@@ -1,8 +1,0 @@
-pyproject.toml
-src/groomnote_cli/__init__.py
-src/groomnote_cli/__main__.py
-src/groomnote_cli.egg-info/PKG-INFO
-src/groomnote_cli.egg-info/SOURCES.txt
-src/groomnote_cli.egg-info/dependency_links.txt
-src/groomnote_cli.egg-info/top_level.txt
-tests/test_import.py
