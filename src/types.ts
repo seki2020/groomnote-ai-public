@@ -1,7 +1,7 @@
 export type Bindings = {
   APP_ENV: string;
-  ANALYZER_MODE: "fake" | "workers-ai";
-  TTS_MODE: "fake" | "workers-ai";
+  ANALYZER_MODE: "fake" | "fake-error" | "workers-ai";
+  TTS_MODE: "fake" | "fake-error" | "workers-ai";
   STT_TOKEN_MODE: "fake" | "fake-error" | "assemblyai";
   ASSEMBLYAI_API_KEY?: string;
   DEMO_API_KEY: string;

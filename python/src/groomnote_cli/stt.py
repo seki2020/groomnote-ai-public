@@ -110,19 +110,34 @@ def split_trailing_end_command(text: str) -> tuple[str, bool]:
 
 
 def is_actionable_review_response(text: str) -> bool:
+    return extract_actionable_review_response(text) is not None
+
+
+def extract_actionable_review_response(text: str) -> str | None:
+    stripped = text.strip()
     normalized = normalize_spoken_command(text)
     if re.fullmatch(
         r"(?:yes\s+)?(?:approve|approved|save(?:\s+it|\s+the\s+note)?|looks\s+good|"
         r"that(?:s|\s+is)\s+correct)(?:\s+please)?",
         normalized,
     ):
-        return True
-    return bool(
-        re.match(
-            r"^(?:correction|correct|change|actually|add|remove|replace)\s+\S+",
-            normalized,
-        )
+        return stripped
+    correction = re.search(
+        r"(?i)(?:^|[.!?]\s*)(correction|correct|change|actually|add|remove|replace)\s+\S+",
+        stripped,
     )
+    if correction is not None:
+        return stripped[correction.start(1):].strip()
+    segments = [segment.strip() for segment in re.split(r"[.!?]+", stripped) if segment.strip()]
+    if segments:
+        last = segments[-1]
+        if re.fullmatch(
+            r"(?:yes\s+)?(?:approve|approved|save(?:\s+it|\s+the\s+note)?|looks\s+good|"
+            r"that(?:s|\s+is)\s+correct)(?:\s+please)?",
+            normalize_spoken_command(last),
+        ):
+            return last
+    return None
 
 
 @dataclass(frozen=True)
@@ -274,11 +289,14 @@ class BufferedRoundCoordinator:
 
     @property
     def response_text(self) -> str:
-        return " ".join(
+        combined = " ".join(
             transcript
             for transcript in self.accumulator.finalized_transcripts
             if not is_round_end_command(transcript)
         ).strip()
+        if self.mode == "review":
+            return extract_actionable_review_response(combined) or combined
+        return combined
 
     def complete_after_termination(self) -> dict[str, Any] | None:
         if not self.finish_requested or self.completed:

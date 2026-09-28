@@ -75,6 +75,13 @@ export interface AiRunner {
   run(model: string, input: Record<string, unknown>): Promise<unknown>;
 }
 
+export class AnalysisUnavailableError extends Error {
+  constructor(cause?: unknown) {
+    super("Workers AI returned invalid structured grooming output.", { cause });
+    this.name = "AnalysisUnavailableError";
+  }
+}
+
 export type AnalysisInput = {
   petName: string;
   breed: string | null;
@@ -99,6 +106,13 @@ function validateSemanticRules(extraction: GroomingExtraction): GroomingExtracti
   }
   if (!extraction.needs_follow_up && extraction.follow_up_question !== null) {
     throw new Error("A complete extraction must not include a follow-up question.");
+  }
+  const completed = new Set(extraction.services_completed.map((service) => service.trim().toLowerCase()));
+  const contradictory = extraction.services_not_completed.find((service) =>
+    completed.has(service.trim().toLowerCase()),
+  );
+  if (contradictory) {
+    throw new Error(`A service cannot be both completed and not completed: ${contradictory}`);
   }
   return extraction;
 }
@@ -160,7 +174,7 @@ export class WorkersAIAnalyzer {
         lastError = error;
       }
     }
-    throw new Error("Workers AI returned invalid structured grooming output.", { cause: lastError });
+    throw new AnalysisUnavailableError(lastError);
   }
 }
 

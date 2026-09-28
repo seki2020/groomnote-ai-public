@@ -1,7 +1,11 @@
 import { Hono } from "hono";
 import { z } from "zod";
 import { analyzeDeterministically } from "../analysis/fake-llm";
-import { extractionToHandover, WorkersAIAnalyzer } from "../analysis/workers-ai";
+import {
+  AnalysisUnavailableError,
+  extractionToHandover,
+  WorkersAIAnalyzer,
+} from "../analysis/workers-ai";
 import { fakeMp3, MP3_CONTENT_TYPE, WorkersAITts } from "../audio/tts";
 import {
   releaseSpeechRequest,
@@ -145,6 +149,9 @@ async function analyzeSession(
       correctionInstruction: options.correctionInstruction,
       currentDraft: options.currentDraft,
     });
+  }
+  if (env.ANALYZER_MODE === "fake-error") {
+    throw new AnalysisUnavailableError(new Error("Deterministic analysis failure."));
   }
   const analyzer = new WorkersAIAnalyzer(
     env.AI as unknown as import("../analysis/workers-ai").AiRunner,
@@ -300,11 +307,31 @@ api.post("/sessions/:id/correct", async (context) => {
   await context.env.DB.prepare(
     "UPDATE stt_rounds SET status = 'COMPLETED', completed_at = ? WHERE session_id = ? AND status = 'OPEN'",
   ).bind(new Date().toISOString(), id).run();
-  return context.json(await completeAnalysis(context.env, id, {
-    hasFollowUpAnswer: true,
-    correctionInstruction: body.transcript,
-    currentDraft,
-  }));
+  try {
+    return context.json(await completeAnalysis(context.env, id, {
+      hasFollowUpAnswer: true,
+      correctionInstruction: body.transcript,
+      currentDraft,
+    }));
+  } catch (error) {
+    if (!(error instanceof AnalysisUnavailableError)) throw error;
+    const results = await context.env.DB.batch([
+      context.env.DB.prepare(
+        "DELETE FROM transcript_turns WHERE session_id = ? AND provider_turn_id = ?",
+      ).bind(id, body.providerTurnId),
+      context.env.DB.prepare(
+        `UPDATE sessions SET state = 'REVIEWING', reviewed_revision = NULL,
+             approved_revision = NULL, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+         WHERE id = ? AND state = 'CORRECTING' AND current_draft_revision = ?`,
+      ).bind(id, session.currentDraftRevision),
+    ]);
+    if (results[1].meta.changes !== 1) throw error;
+    throw new ApiError(
+      503,
+      "ANALYSIS_UNAVAILABLE",
+      "The correction could not be interpreted safely. Review the unchanged draft and try again.",
+    );
+  }
 });
 
 api.post("/sessions/:id/review", async (context) => {
@@ -382,6 +409,9 @@ api.post("/sessions/:id/speech", async (context) => {
   const text = await resolveAuthorizedUtterance(context.env.DB, id, body.utterance);
   await reserveSpeechRequest(context.env.DB, id, body);
   try {
+    if (context.env.TTS_MODE === "fake-error") {
+      throw new Error("Deterministic TTS provider failure.");
+    }
     const audio = context.env.TTS_MODE === "fake"
       ? { bytes: fakeMp3(), contentType: MP3_CONTENT_TYPE }
       : await new WorkersAITts(

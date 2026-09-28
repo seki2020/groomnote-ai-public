@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+from pathlib import Path
 
 from groomnote_cli import (
     GroomNoteClient,
@@ -22,6 +24,29 @@ APPOINTMENTS = {
     "bella": "44444444-4444-4444-8444-444444444444",
     "charlie": "55555555-5555-4555-8555-555555555555",
 }
+
+
+def _read_env_value(path: Path, name: str) -> str | None:
+    if not path.is_file():
+        return None
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        if key.strip() != name:
+            continue
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
+            value = value[1:-1]
+        return value.replace("\\$", "$") or None
+    return None
+
+
+def resolve_demo_key(explicit: str | None) -> str | None:
+    return explicit or os.environ.get("DEMO_API_KEY") or _read_env_value(
+        Path.cwd() / ".env", "DEMO_API_KEY"
+    )
 
 
 def run_script(client: GroomNoteClient, case: str, play_speech: bool = False) -> dict[str, object]:
@@ -78,6 +103,7 @@ def main() -> None:
         help="Submit a finalized engineering fallback turn; may be repeated",
     )
     args = parser.parse_args()
+    args.demo_key = resolve_demo_key(args.demo_key)
     if args.version:
         print(f"GroomNote CLI {__version__}")
         return
@@ -86,7 +112,10 @@ def main() -> None:
             print(f"{device.index}: {device.name} ({device.sample_rate} Hz, mono PCM16)")
         return
     if not (args.base_url and args.demo_key and args.script):
-        parser.error("--base-url, --demo-key, and --script are required unless --version is used")
+        parser.error(
+            "--base-url and --script are required; DEMO_API_KEY must come from "
+            "--demo-key, the environment, or the repository-root .env"
+        )
     if args.voice_workflow:
         client = GroomNoteClient(args.base_url, args.demo_key)
         device = select_microphone(args.microphone, list_microphones())

@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Literal
 
 from .audio import play_wav_bytes
-from .client import GroomNoteClient, SpeechAudio
+from .client import ApiError, GroomNoteClient, SpeechAudio
 from .streaming import StreamingOutcome
 
 
@@ -140,9 +140,14 @@ class VoiceWorkflow:
                 raise RuntimeError("Review response was neither a clear approval nor a correction.")
             if corrections >= self.max_corrections:
                 raise RuntimeError("The correction limit was reached.")
-            decision = self.client.correct(
-                f"spoken-correction-{uuid.uuid4()}", transcript
-            )
+            try:
+                decision = self.client.correct(
+                    f"spoken-correction-{uuid.uuid4()}", transcript
+                )
+            except ApiError as error:
+                if error.code != "ANALYSIS_UNAVAILABLE":
+                    raise
+                continue
             if decision.get("action") != "review":
                 raise RuntimeError("The correction did not produce a new reviewable draft.")
             corrections += 1
