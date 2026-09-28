@@ -11,6 +11,7 @@ import {
 import { deserializeHandoverContent, identifierSchema } from "../persistence/schemas";
 import {
   approveAndSave,
+  beginCorrection,
   cancelSession,
   createDraft,
   getSession,
@@ -23,12 +24,13 @@ import {
   FailingTokenProvider,
   FakeTokenProvider,
 } from "../stt/assemblyai";
-import { abandonSttRound, issueSttToken } from "../stt/service";
+import { abandonSttRound, completeSttConnection, issueSttToken } from "../stt/service";
 import { hashCredential, requireDemoCredential, requireSessionCredential } from "./auth";
 import { ApiError } from "./errors";
 import {
   addTurnRequestSchema,
   approveRequestSchema,
+  correctionRequestSchema,
   createSessionRequestSchema,
   replyRequestSchema,
   speechRequestSchema,
@@ -81,8 +83,9 @@ async function insertTextTurn(
   sessionId: string,
   providerTurnId: string,
   transcript: string,
+  allowedStates: readonly string[] = ["COLLECTING"],
 ): Promise<void> {
-  if ((await getSession(db, sessionId)).state !== "COLLECTING") {
+  if (!allowedStates.includes((await getSession(db, sessionId)).state)) {
     throw new ApiError(409, "INVALID_STATE", "The session is not collecting turns.");
   }
   const roundId = await ensureRound(db, sessionId);
@@ -100,7 +103,11 @@ async function insertTextTurn(
 async function analyzeSession(
   env: Bindings,
   sessionId: string,
-  hasFollowUpAnswer: boolean,
+  options: {
+    hasFollowUpAnswer: boolean;
+    correctionInstruction?: string;
+    currentDraft?: ReturnType<typeof deserializeHandoverContent>;
+  },
 ) {
   const identity = await env.DB
     .prepare(
@@ -119,13 +126,24 @@ async function analyzeSession(
   }
   const transcripts = turns.results.map((turn) => turn.transcript);
   if (env.ANALYZER_MODE === "fake") {
-    return analyzeDeterministically({ petName: identity.petName, transcripts, hasFollowUpAnswer });
+    return analyzeDeterministically({
+      petName: identity.petName,
+      transcripts,
+      hasFollowUpAnswer: options.hasFollowUpAnswer,
+      correctionInstruction: options.correctionInstruction,
+      currentDraft: options.currentDraft,
+    });
   }
-  const extraction = await new WorkersAIAnalyzer(env.AI as unknown as import("../analysis/workers-ai").AiRunner).analyze({
+  const analyzer = new WorkersAIAnalyzer(
+    env.AI as unknown as import("../analysis/workers-ai").AiRunner,
+  );
+  const extraction = await analyzer.analyze({
     petName: identity.petName,
     breed: identity.breed,
     transcripts,
-    hasFollowUpAnswer,
+    hasFollowUpAnswer: options.hasFollowUpAnswer,
+    correctionInstruction: options.correctionInstruction,
+    currentDraft: options.currentDraft,
   });
   if (extraction.needs_follow_up) {
     return { kind: "follow_up" as const, question: extraction.follow_up_question! };
@@ -137,8 +155,12 @@ async function analyzeSession(
   };
 }
 
-async function completeAnalysis(env: Bindings, sessionId: string, hasFollowUpAnswer: boolean) {
-  const analysis = await analyzeSession(env, sessionId, hasFollowUpAnswer);
+async function completeAnalysis(
+  env: Bindings,
+  sessionId: string,
+  options: Parameters<typeof analyzeSession>[2],
+) {
+  const analysis = await analyzeSession(env, sessionId, options);
   if (analysis.kind === "follow_up") {
     await transitionSession(env.DB, sessionId, "AWAITING_FOLLOWUP");
     await env.DB.prepare(
@@ -216,7 +238,7 @@ api.post("/sessions/:id/complete-round", async (context) => {
   )
     .bind(new Date().toISOString(), id)
     .run();
-  return context.json(await completeAnalysis(context.env, id, false));
+  return context.json(await completeAnalysis(context.env, id, { hasFollowUpAnswer: false }));
 });
 
 api.post("/sessions/:id/reply", async (context) => {
@@ -231,7 +253,32 @@ api.post("/sessions/:id/reply", async (context) => {
   )
     .bind(new Date().toISOString(), id)
     .run();
-  return context.json(await completeAnalysis(context.env, id, true));
+  return context.json(await completeAnalysis(context.env, id, { hasFollowUpAnswer: true }));
+});
+
+api.post("/sessions/:id/correct", async (context) => {
+  const id = sessionIdFrom(context);
+  await requireSessionCredential(context.env.DB, context.req.raw, id);
+  const body = await parseJson(context.req.raw, correctionRequestSchema);
+  const session = await getSession(context.env.DB, id);
+  if (session.state !== "AWAITING_APPROVAL" || session.currentDraftRevision < 1) {
+    throw new ApiError(409, "INVALID_STATE", "The session is not awaiting a correction.");
+  }
+  const draft = await context.env.DB.prepare(
+    "SELECT content_json AS contentJson FROM note_drafts WHERE session_id = ? AND revision = ?",
+  ).bind(id, session.currentDraftRevision).first<{ contentJson: string }>();
+  if (!draft) throw new ApiError(409, "DRAFT_NOT_FOUND", "The current draft is missing.");
+  const currentDraft = deserializeHandoverContent(draft.contentJson);
+  await beginCorrection(context.env.DB, id);
+  await insertTextTurn(context.env.DB, id, body.providerTurnId, body.transcript, ["CORRECTING"]);
+  await context.env.DB.prepare(
+    "UPDATE stt_rounds SET status = 'COMPLETED', completed_at = ? WHERE session_id = ? AND status = 'OPEN'",
+  ).bind(new Date().toISOString(), id).run();
+  return context.json(await completeAnalysis(context.env, id, {
+    hasFollowUpAnswer: true,
+    correctionInstruction: body.transcript,
+    currentDraft,
+  }));
 });
 
 api.post("/sessions/:id/review", async (context) => {
@@ -292,6 +339,16 @@ api.post("/sessions/:id/stt-rounds/:roundId/close", async (context) => {
   return context.json(await abandonSttRound(context.env.DB, id, parsedRoundId.data));
 });
 
+api.post("/sessions/:id/stt-rounds/:roundId/complete", async (context) => {
+  const id = sessionIdFrom(context);
+  await requireSessionCredential(context.env.DB, context.req.raw, id);
+  const parsedRoundId = identifierSchema.safeParse(context.req.param("roundId"));
+  if (!parsedRoundId.success) {
+    throw new ApiError(422, "VALIDATION_ERROR", "The transcription round ID is invalid.");
+  }
+  return context.json(await completeSttConnection(context.env.DB, id, parsedRoundId.data));
+});
+
 api.post("/sessions/:id/speech", async (context) => {
   const id = sessionIdFrom(context);
   await requireSessionCredential(context.env.DB, context.req.raw, id);
@@ -299,12 +356,11 @@ api.post("/sessions/:id/speech", async (context) => {
   const text = await resolveAuthorizedUtterance(context.env.DB, id, body.utterance);
   await reserveSpeechRequest(context.env.DB, id, body);
   try {
-    const audio =
-      context.env.TTS_MODE === "fake"
-        ? { bytes: fakeMp3(), contentType: MP3_CONTENT_TYPE }
-        : await new WorkersAITts(
-            context.env.AI as unknown as import("../audio/tts").TtsRunner,
-          ).synthesize(text);
+    const audio = context.env.TTS_MODE === "fake"
+      ? { bytes: fakeMp3(), contentType: MP3_CONTENT_TYPE }
+      : await new WorkersAITts(
+          context.env.AI as unknown as import("../audio/tts").TtsRunner,
+        ).synthesize(text);
     return new Response(audio.bytes.slice().buffer as ArrayBuffer, {
       headers: {
         "Content-Type": audio.contentType,

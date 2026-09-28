@@ -81,6 +81,12 @@ _END_COMMAND = re.compile(
     r"prepare\s+my\s+note|that(?:s|\s+is)\s+everything)(?:\s+please)?$",
 )
 
+_TRAILING_END_COMMAND = re.compile(
+    r"(?i)(?:[.!?;,]\s*)(?:okay\s+)?(?:groom\s*note\s+)?"
+    r"(?:finish\s+(?:this|the)\s+round|prepare\s+my\s+note|"
+    r"that(?:'s|\s+is)\s+everything)(?:\s+please)?[.!?]*\s*$",
+)
+
 
 def normalize_spoken_command(text: str) -> str:
     normalized = text.casefold().replace("’", "'")
@@ -91,6 +97,32 @@ def normalize_spoken_command(text: str) -> str:
 
 def is_round_end_command(text: str) -> bool:
     return bool(_END_COMMAND.fullmatch(normalize_spoken_command(text)))
+
+
+def split_trailing_end_command(text: str) -> tuple[str, bool]:
+    stripped = text.strip()
+    if is_round_end_command(stripped):
+        return stripped, True
+    match = _TRAILING_END_COMMAND.search(stripped)
+    if match is None:
+        return stripped, False
+    return stripped[: match.start()].strip(), True
+
+
+def is_actionable_review_response(text: str) -> bool:
+    normalized = normalize_spoken_command(text)
+    if re.fullmatch(
+        r"(?:yes\s+)?(?:approve|approved|save(?:\s+it|\s+the\s+note)?|looks\s+good|"
+        r"that(?:s|\s+is)\s+correct)(?:\s+please)?",
+        normalized,
+    ):
+        return True
+    return bool(
+        re.match(
+            r"^(?:correction|correct|change|actually|add|remove|replace)\s+\S+",
+            normalized,
+        )
+    )
 
 
 @dataclass(frozen=True)
@@ -127,8 +159,9 @@ class TranscriptAccumulator:
             return TranscriptUpdate(self.visible_text, duplicate=True)
         if not transcript:
             return TranscriptUpdate(self.visible_text)
-        self.finalized_by_order[order] = transcript
-        final = FinalizedTurn(order, transcript, is_round_end_command(transcript))
+        business_transcript, ends_round = split_trailing_end_command(transcript)
+        self.finalized_by_order[order] = business_transcript
+        final = FinalizedTurn(order, business_transcript, ends_round)
         return TranscriptUpdate(self.visible_text, finalized=final)
 
     @property
@@ -168,6 +201,9 @@ class RoundApi(Protocol):
     def add_turn(self, provider_turn_id: str, transcript: str) -> dict[str, Any]: ...
     def complete_round(self) -> dict[str, Any]: ...
     def close_stt_round(self, round_id: str) -> dict[str, Any]: ...
+    def complete_stt_round(self, round_id: str) -> dict[str, Any]: ...
+    def reply(self, provider_turn_id: str, transcript: str) -> dict[str, Any]: ...
+    def correct(self, provider_turn_id: str, transcript: str) -> dict[str, Any]: ...
 
 
 @dataclass
@@ -205,6 +241,58 @@ class RoundCoordinator:
         if not self.finish_requested or self.completed:
             return None
         result = self.client.complete_round()
+        self.completed = True
+        return result
+
+    def recover_from_disconnect(self) -> dict[str, Any] | None:
+        if self.completed:
+            return None
+        return self.client.close_stt_round(self.round_id)
+
+
+@dataclass
+class BufferedRoundCoordinator:
+    client: RoundApi
+    round_id: str
+    mode: str
+    accumulator: TranscriptAccumulator = field(default_factory=TranscriptAccumulator)
+    finish_requested: bool = False
+    completed: bool = False
+
+    def __post_init__(self) -> None:
+        if self.mode not in {"follow_up", "correction", "review"}:
+            raise ValueError("Buffered STT mode is invalid.")
+
+    def handle_event(self, event: dict[str, Any]) -> TranscriptUpdate:
+        update = self.accumulator.consume(event)
+        if update.finalized is not None:
+            if self.mode == "review":
+                self.finish_requested = is_actionable_review_response(self.response_text)
+            else:
+                self.finish_requested = self.finish_requested or update.finalized.ends_round
+        return update
+
+    @property
+    def response_text(self) -> str:
+        return " ".join(
+            transcript
+            for transcript in self.accumulator.finalized_transcripts
+            if not is_round_end_command(transcript)
+        ).strip()
+
+    def complete_after_termination(self) -> dict[str, Any] | None:
+        if not self.finish_requested or self.completed:
+            return None
+        text = self.response_text
+        if not text:
+            raise ValueError("The spoken response contained no content.")
+        if self.mode == "follow_up":
+            result = self.client.reply(f"{self.round_id}:follow-up", text)
+        elif self.mode == "correction":
+            result = self.client.correct(f"{self.round_id}:correction", text)
+        else:
+            self.client.complete_stt_round(self.round_id)
+            result = {"action": "review_intent", "transcript": text}
         self.completed = True
         return result
 

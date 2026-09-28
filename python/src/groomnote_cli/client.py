@@ -128,6 +128,11 @@ class GroomNoteClient:
             "POST", f"/v1/sessions/{self.session_id}/stt-rounds/{round_id}/close", {}
         )
 
+    def complete_stt_round(self, round_id: str) -> dict[str, Any]:
+        return self._request(
+            "POST", f"/v1/sessions/{self.session_id}/stt-rounds/{round_id}/complete", {}
+        )
+
     def complete_round(self) -> dict[str, Any]:
         return self._request("POST", f"/v1/sessions/{self.session_id}/complete-round", {})
 
@@ -135,6 +140,13 @@ class GroomNoteClient:
         return self._request(
             "POST",
             f"/v1/sessions/{self.session_id}/reply",
+            {"providerTurnId": provider_turn_id, "transcript": transcript},
+        )
+
+    def correct(self, provider_turn_id: str, transcript: str) -> dict[str, Any]:
+        return self._request(
+            "POST",
+            f"/v1/sessions/{self.session_id}/correct",
             {"providerTurnId": provider_turn_id, "transcript": transcript},
         )
 

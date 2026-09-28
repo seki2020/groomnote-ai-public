@@ -8,4 +8,6 @@ export function analyzeDeterministically(input: {
   petName: string;
   transcripts: readonly string[];
   hasFollowUpAnswer: boolean;
+  correctionInstruction?: string;
+  currentDraft?: HandoverContent;
 }): FakeAnalysis { throw new Error("PRIVATE_DEMO_ANALYZER_NOT_INCLUDED"); }

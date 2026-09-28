@@ -9,6 +9,7 @@ from urllib.parse import urlencode
 from .client import GroomNoteClient, SttToken
 from .stt import (
     AudioFormat,
+    BufferedRoundCoordinator,
     MicrophoneDevice,
     RoundCoordinator,
     SilenceConfirmation,
@@ -89,6 +90,7 @@ class DirectAssemblyAIStreamingRound:
         on_silence_confirmation: Callable[[], None] | None = None,
         sustained_silence_seconds: float = 8.0,
         speech_rms_threshold: float = 250.0,
+        mode: str = "initial",
         websocket_module: Any | None = None,
     ) -> None:
         if websocket_module is None:
@@ -101,6 +103,9 @@ class DirectAssemblyAIStreamingRound:
         self.sustained_silence_seconds = sustained_silence_seconds
         self.speech_rms_threshold = speech_rms_threshold
         self.websocket_module = websocket_module
+        if mode not in {"initial", "follow_up", "correction", "review"}:
+            raise ValueError("Streaming round mode is invalid.")
+        self.mode = mode
 
     def _url(self, credentials: SttToken) -> str:
         params = {
@@ -116,6 +121,7 @@ class DirectAssemblyAIStreamingRound:
                 "bath and brush",
                 "coat",
                 "ears",
+                "nail trim",
                 "prepare my note",
                 "finish this round",
             ]),
@@ -125,7 +131,11 @@ class DirectAssemblyAIStreamingRound:
 
     def run_once(self) -> StreamingOutcome:
         credentials = self.client.stt_token()
-        coordinator = RoundCoordinator(self.client, credentials.round_id)
+        coordinator = (
+            RoundCoordinator(self.client, credentials.round_id)
+            if self.mode == "initial"
+            else BufferedRoundCoordinator(self.client, credentials.round_id, self.mode)
+        )
         done = threading.Event()
         termination_seen = False
         disconnect_released = False
@@ -177,7 +187,7 @@ class DirectAssemblyAIStreamingRound:
             elif message_type == "Turn":
                 update = coordinator.handle_event(message)
                 self.on_partial(update.visible_text)
-                if update.finalized and update.finalized.ends_round:
+                if update.finalized and coordinator.finish_requested:
                     terminate(socket)
             elif message_type == "Termination":
                 termination_seen = True

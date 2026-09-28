@@ -8,4 +8,5 @@ export const addTurnRequestSchema = z.object({
   transcript: z.string().trim().min(1).max(8_000),
 });
 export const replyRequestSchema = addTurnRequestSchema;
+export const correctionRequestSchema = addTurnRequestSchema;
 export const approveRequestSchema = z.object({ revision: z.number().int().positive() });

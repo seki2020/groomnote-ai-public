@@ -15,6 +15,7 @@ from groomnote_cli.streaming import (
     SoundDeviceMicrophone,
     run_keyboard_round,
 )
+from groomnote_cli.workflow import VoiceWorkflow
 
 
 APPOINTMENTS = {
@@ -66,6 +67,11 @@ def main() -> None:
     parser.add_argument("--microphone", help="Windows input device index or unique name fragment")
     parser.add_argument("--stream", action="store_true", help="Run direct AssemblyAI microphone STT")
     parser.add_argument(
+        "--voice-workflow",
+        action="store_true",
+        help="Run the complete half-duplex multi-round voice workflow",
+    )
+    parser.add_argument(
         "--keyboard-turn",
         action="append",
         default=[],
@@ -81,6 +87,26 @@ def main() -> None:
         return
     if not (args.base_url and args.demo_key and args.script):
         parser.error("--base-url, --demo-key, and --script are required unless --version is used")
+    if args.voice_workflow:
+        client = GroomNoteClient(args.base_url, args.demo_key)
+        device = select_microphone(args.microphone, list_microphones())
+
+        def capture(mode: str):
+            print(f"Starting {mode} listening round...", flush=True)
+            return DirectAssemblyAIStreamingRound(
+                client,
+                SoundDeviceMicrophone(device),
+                mode=mode,
+                on_partial=lambda text: print(f"\r{text}", end="", flush=True),
+                on_ready=lambda: print("Listening. Start speaking now.", flush=True),
+                on_silence_confirmation=lambda: print(
+                    "\nAre you finished? Use a clear end command when required."
+                ),
+            ).run_with_recovery()
+
+        result = VoiceWorkflow(client, capture).run(APPOINTMENTS[args.script])
+        print(json.dumps(result.__dict__, sort_keys=True))
+        return
     if args.stream or args.keyboard_turn:
         client = GroomNoteClient(args.base_url, args.demo_key)
         client.create_session(APPOINTMENTS[args.script])

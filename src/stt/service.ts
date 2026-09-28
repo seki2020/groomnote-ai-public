@@ -7,7 +7,7 @@ import {
   type TokenProvider,
 } from "./assemblyai";
 
-export const MAX_STT_TOKEN_ISSUANCES = 3;
+export const MAX_STT_TOKEN_ISSUANCES = 6;
 export const MAX_DAILY_STT_TOKEN_ISSUANCES = 50;
 
 async function releaseQuota(db: D1Database, sessionId: string): Promise<void> {
@@ -29,7 +29,7 @@ async function reserveRound(db: D1Database, sessionId: string): Promise<string> 
   if (new Date(session.expiresAt).getTime() <= Date.now()) {
     throw new ApiError(409, "SESSION_EXPIRED", "The session has expired.");
   }
-  if (session.state !== "COLLECTING") {
+  if (!("COLLECTING AWAITING_FOLLOWUP AWAITING_APPROVAL".split(" ") as string[]).includes(session.state)) {
     throw new ApiError(409, "INVALID_STATE", "The session cannot start transcription now.");
   }
 
@@ -118,6 +118,23 @@ export async function abandonSttRound(
   ).bind(new Date().toISOString(), roundId, sessionId).run();
   if (result.meta.changes === 1) return { closed: true, status: "FAILED" as const };
 
+  const existing = await db.prepare(
+    "SELECT status FROM stt_rounds WHERE id = ? AND session_id = ?",
+  ).bind(roundId, sessionId).first<{ status: string }>();
+  if (!existing) throw new ApiError(404, "STT_ROUND_NOT_FOUND", "The transcription round was not found.");
+  return { closed: false, status: existing.status };
+}
+
+export async function completeSttConnection(
+  db: D1Database,
+  sessionId: string,
+  roundId: string,
+) {
+  const result = await db.prepare(
+    `UPDATE stt_rounds SET status = 'COMPLETED', completed_at = ?
+     WHERE id = ? AND session_id = ? AND status = 'OPEN'`,
+  ).bind(new Date().toISOString(), roundId, sessionId).run();
+  if (result.meta.changes === 1) return { closed: true, status: "COMPLETED" as const };
   const existing = await db.prepare(
     "SELECT status FROM stt_rounds WHERE id = ? AND session_id = ?",
   ).bind(roundId, sessionId).first<{ status: string }>();
