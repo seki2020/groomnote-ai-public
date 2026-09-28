@@ -1,0 +1,30 @@
+{
+  "name": "groomnote-ai",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "set XDG_CONFIG_HOME=.wrangler-config&& wrangler dev",
+    "typecheck": "tsc --noEmit",
+    "test:unit": "set XDG_CONFIG_HOME=.wrangler-config&& vitest run --config vitest.config.ts",
+    "test:integration": "set XDG_CONFIG_HOME=.wrangler-config&& vitest run --config vitest.integration.config.ts",
+    "test:python": ".venv\\Scripts\\python.exe -m pytest -p no:cacheprovider python/tests",
+    "test:regression": "npm run test:unit && npm run test:integration && npm run test:python",
+    "verify": "npm run typecheck && npm run test:regression",
+    "env:check": "node scripts/check-environment.mjs"
+  },
+  "dependencies": {
+    "hono": "^4.13.9",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-plugin": "^1.3.0",
+    "@cloudflare/workers-types": "^5.20260928.1",
+    "typescript": "^5.9.2",
+    "vitest": "^4.1.0",
+    "wrangler": "^4.142.0"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

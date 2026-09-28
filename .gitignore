@@ -1,0 +1,13 @@
+node_modules/
+.wrangler/
+.wrangler-config/
+dist/
+coverage/
+test-results/
+.pytest_cache/
+__pycache__/
+*.py[cod]
+.venv/
+.dev.vars*
+.env*
+!.env.example
