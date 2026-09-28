@@ -1,0 +1,25 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "groomnote-public-showcase",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-28",
+  "workers_dev": true,
+  "preview_urls": false,
+  "vars": {
+    "APP_ENV": "production",
+    "ANALYZER_MODE": "workers-ai",
+    "TTS_MODE": "workers-ai",
+    "STT_TOKEN_MODE": "assemblyai"
+  },
+  "ai": {
+    "binding": "AI"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "groomnote-public-showcase",
+      "database_id": "PUBLIC_CONFIGURATION_PLACEHOLDER",
+      "migrations_dir": "migrations"
+    }
+  ]
+}

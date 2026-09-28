@@ -19,6 +19,24 @@ Transport = Callable[[str, str, dict[str, str], dict[str, Any] | None], tuple[in
 BinaryTransport = Callable[
     [str, str, dict[str, str], dict[str, Any] | None], tuple[int, str, bytes]
 ]
+CLIENT_USER_AGENT = "GroomNote-CLI/0.0.0"
+
+
+def _decode_json_payload(raw: bytes, status: int) -> dict[str, Any]:
+    try:
+        value = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        if status >= 400:
+            return {
+                "error": {
+                    "code": "NON_JSON_HTTP_ERROR",
+                    "message": "The server returned a non-JSON HTTP error.",
+                }
+            }
+        raise RuntimeError("The server returned an invalid JSON success response.")
+    if not isinstance(value, dict):
+        raise RuntimeError("The server returned a non-object JSON response.")
+    return value
 
 
 def _urllib_transport(
@@ -28,12 +46,17 @@ def _urllib_transport(
     body: dict[str, Any] | None,
 ) -> tuple[int, dict[str, Any]]:
     encoded = None if body is None else json.dumps(body).encode("utf-8")
-    request = Request(url, data=encoded, headers=headers, method=method)
+    request = Request(
+        url,
+        data=encoded,
+        headers={"User-Agent": CLIENT_USER_AGENT, **headers},
+        method=method,
+    )
     try:
         with urlopen(request, timeout=15) as response:
-            return response.status, json.loads(response.read().decode("utf-8"))
+            return response.status, _decode_json_payload(response.read(), response.status)
     except HTTPError as error:
-        payload = json.loads(error.read().decode("utf-8"))
+        payload = _decode_json_payload(error.read(), error.code)
         return error.code, payload
 
 
@@ -44,7 +67,12 @@ def _urllib_binary_transport(
     body: dict[str, Any] | None,
 ) -> tuple[int, str, bytes]:
     encoded = None if body is None else json.dumps(body).encode("utf-8")
-    request = Request(url, data=encoded, headers=headers, method=method)
+    request = Request(
+        url,
+        data=encoded,
+        headers={"User-Agent": CLIENT_USER_AGENT, **headers},
+        method=method,
+    )
     try:
         with urlopen(request, timeout=30) as response:
             return response.status, response.headers.get_content_type(), response.read()
