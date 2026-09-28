@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { identifierSchema } from "../persistence/schemas";
+export { speechRequestSchema } from "../audio/speech";
 
 export const createSessionRequestSchema = z.object({ appointmentId: identifierSchema });
 export const addTurnRequestSchema = z.object({

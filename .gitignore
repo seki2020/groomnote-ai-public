@@ -4,6 +4,7 @@ node_modules/
 dist/
 coverage/
 test-results/
+artifacts/audio/
 .pytest_cache/
 __pycache__/
 *.py[cod]

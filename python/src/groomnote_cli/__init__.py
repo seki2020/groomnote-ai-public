@@ -2,6 +2,7 @@
 
 __version__ = "0.0.0"
 
-from .client import ApiError, GroomNoteClient
+from .audio import play_wav_bytes
+from .client import ApiError, GroomNoteClient, SpeechAudio
 
-__all__ = ["ApiError", "GroomNoteClient", "__version__"]
+__all__ = ["ApiError", "GroomNoteClient", "SpeechAudio", "play_wav_bytes", "__version__"]

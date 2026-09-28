@@ -6,6 +6,7 @@
   "vars": {
     "APP_ENV": "development",
     "ANALYZER_MODE": "fake",
+    "TTS_MODE": "fake",
     "DEMO_API_KEY": "PUBLIC_CONFIGURATION_PLACEHOLDER"
   },
   "d1_databases": [

@@ -2,6 +2,12 @@ import { Hono } from "hono";
 import { z } from "zod";
 import { analyzeDeterministically } from "../analysis/fake-llm";
 import { extractionToHandover, WorkersAIAnalyzer } from "../analysis/workers-ai";
+import { fakeMp3, MP3_CONTENT_TYPE, WorkersAITts } from "../audio/tts";
+import {
+  releaseSpeechRequest,
+  reserveSpeechRequest,
+  resolveAuthorizedUtterance,
+} from "../audio/speech";
 import { deserializeHandoverContent, identifierSchema } from "../persistence/schemas";
 import {
   approveAndSave,
@@ -19,6 +25,7 @@ import {
   approveRequestSchema,
   createSessionRequestSchema,
   replyRequestSchema,
+  speechRequestSchema,
 } from "./schemas";
 
 const api = new Hono<{ Bindings: Bindings }>();
@@ -128,6 +135,10 @@ async function completeAnalysis(env: Bindings, sessionId: string, hasFollowUpAns
   const analysis = await analyzeSession(env, sessionId, hasFollowUpAnswer);
   if (analysis.kind === "follow_up") {
     await transitionSession(env.DB, sessionId, "AWAITING_FOLLOWUP");
+    await env.DB.prepare(
+      `INSERT INTO session_events (id, session_id, event_type, payload_json)
+       VALUES (?, ?, 'FOLLOW_UP_ASKED', ?)`,
+    ).bind(crypto.randomUUID(), sessionId, JSON.stringify({ question: analysis.question })).run();
     return { action: "follow_up" as const, question: analysis.question };
   }
   const revision = await createDraft(env.DB, {
@@ -251,6 +262,31 @@ api.post("/sessions/:id/cancel", async (context) => {
   const id = sessionIdFrom(context);
   await requireSessionCredential(context.env.DB, context.req.raw, id);
   return context.json(await cancelSession(context.env.DB, id));
+});
+
+api.post("/sessions/:id/speech", async (context) => {
+  const id = sessionIdFrom(context);
+  await requireSessionCredential(context.env.DB, context.req.raw, id);
+  const body = await parseJson(context.req.raw, speechRequestSchema);
+  const text = await resolveAuthorizedUtterance(context.env.DB, id, body.utterance);
+  await reserveSpeechRequest(context.env.DB, id, body);
+  try {
+    const audio =
+      context.env.TTS_MODE === "fake"
+        ? { bytes: fakeMp3(), contentType: MP3_CONTENT_TYPE }
+        : await new WorkersAITts(
+            context.env.AI as unknown as import("../audio/tts").TtsRunner,
+          ).synthesize(text);
+    return new Response(audio.bytes.slice().buffer as ArrayBuffer, {
+      headers: {
+        "Content-Type": audio.contentType,
+        "X-GroomNote-Utterance": body.utterance,
+      },
+    });
+  } catch {
+    await releaseSpeechRequest(context.env.DB, id, body.requestId);
+    throw new ApiError(503, "TTS_UNAVAILABLE", "Speech generation is temporarily unavailable.");
+  }
 });
 
 api.get("/notes/:id", async (context) => {

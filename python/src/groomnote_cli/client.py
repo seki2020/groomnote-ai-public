@@ -16,6 +16,9 @@ class ApiError(RuntimeError):
 
 
 Transport = Callable[[str, str, dict[str, str], dict[str, Any] | None], tuple[int, dict[str, Any]]]
+BinaryTransport = Callable[
+    [str, str, dict[str, str], dict[str, Any] | None], tuple[int, str, bytes]
+]
 
 
 def _urllib_transport(
@@ -34,11 +37,33 @@ def _urllib_transport(
         return error.code, payload
 
 
+def _urllib_binary_transport(
+    method: str,
+    url: str,
+    headers: dict[str, str],
+    body: dict[str, Any] | None,
+) -> tuple[int, str, bytes]:
+    encoded = None if body is None else json.dumps(body).encode("utf-8")
+    request = Request(url, data=encoded, headers=headers, method=method)
+    try:
+        with urlopen(request, timeout=30) as response:
+            return response.status, response.headers.get_content_type(), response.read()
+    except HTTPError as error:
+        return error.code, error.headers.get_content_type(), error.read()
+
+
+@dataclass(frozen=True)
+class SpeechAudio:
+    content_type: str
+    data: bytes
+
+
 @dataclass
 class GroomNoteClient:
     base_url: str
     demo_api_key: str
     transport: Transport = _urllib_transport
+    binary_transport: BinaryTransport = _urllib_binary_transport
     session_id: str | None = None
     session_token: str | None = None
 
@@ -100,3 +125,26 @@ class GroomNoteClient:
     def get_note(self, note_id: str) -> dict[str, Any]:
         query = urlencode({"sessionId": self.session_id})
         return self._request("GET", f"/v1/notes/{note_id}?{query}")
+
+    def speech(self, utterance: str, request_id: str) -> SpeechAudio:
+        if not (self.session_id and self.session_token):
+            raise RuntimeError("A session must be created first.")
+        status, content_type, data = self.binary_transport(
+            "POST",
+            f"{self.base_url.rstrip('/')}/v1/sessions/{self.session_id}/speech",
+            {
+                "Authorization": f"Bearer {self.session_token}",
+                "Content-Type": "application/json",
+            },
+            {"requestId": request_id, "utterance": utterance},
+        )
+        if status >= 400:
+            try:
+                payload = json.loads(data.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                payload = {}
+            error = payload.get("error", {})
+            raise ApiError(status, error.get("code", "HTTP_ERROR"), error.get("message", "Request failed"))
+        if not data or not content_type.startswith("audio/"):
+            raise RuntimeError("Speech endpoint returned invalid audio.")
+        return SpeechAudio(content_type=content_type, data=data)

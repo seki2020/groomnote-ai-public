@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 
-from groomnote_cli import GroomNoteClient, __version__
+from groomnote_cli import GroomNoteClient, __version__, play_wav_bytes
 
 
 APPOINTMENTS = {
@@ -12,8 +12,11 @@ APPOINTMENTS = {
 }
 
 
-def run_script(client: GroomNoteClient, case: str) -> dict[str, object]:
+def run_script(client: GroomNoteClient, case: str, play_speech: bool = False) -> dict[str, object]:
     client.create_session(APPOINTMENTS[case])
+    opening_audio = client.speech("opening", f"{case}-opening")
+    if play_speech:
+        play_wav_bytes(opening_audio.data)
     if case == "bella":
         client.add_turn(
             "bella-turn-1",
@@ -34,6 +37,8 @@ def run_script(client: GroomNoteClient, case: str) -> dict[str, object]:
     return {
         "case": case,
         "sessionId": client.session_id,
+        "openingAudioBytes": len(opening_audio.data),
+        "openingAudioType": opening_audio.content_type,
         "reviewedContent": review["content"],
         "note": note,
     }
@@ -45,13 +50,16 @@ def main() -> None:
     parser.add_argument("--base-url")
     parser.add_argument("--demo-key")
     parser.add_argument("--script", choices=sorted(APPOINTMENTS))
+    parser.add_argument("--play-speech", action="store_true")
     args = parser.parse_args()
     if args.version:
         print(f"GroomNote CLI {__version__}")
         return
     if not (args.base_url and args.demo_key and args.script):
         parser.error("--base-url, --demo-key, and --script are required unless --version is used")
-    result = run_script(GroomNoteClient(args.base_url, args.demo_key), args.script)
+    result = run_script(
+        GroomNoteClient(args.base_url, args.demo_key), args.script, play_speech=args.play_speech
+    )
     print(json.dumps(result, sort_keys=True))
 
 
