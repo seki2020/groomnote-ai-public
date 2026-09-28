@@ -5,6 +5,7 @@
   "compatibility_date": "2026-09-28",
   "vars": {
     "APP_ENV": "development",
+    "ANALYZER_MODE": "fake",
     "DEMO_API_KEY": "PUBLIC_CONFIGURATION_PLACEHOLDER"
   },
   "d1_databases": [

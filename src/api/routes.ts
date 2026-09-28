@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import { z } from "zod";
 import { analyzeDeterministically } from "../analysis/fake-llm";
+import { extractionToHandover, WorkersAIAnalyzer } from "../analysis/workers-ai";
 import { deserializeHandoverContent, identifierSchema } from "../persistence/schemas";
 import {
   approveAndSave,
@@ -83,36 +84,53 @@ async function insertTextTurn(
     .run();
 }
 
-async function analyzeSession(db: D1Database, sessionId: string, hasFollowUpAnswer: boolean) {
-  const identity = await db
+async function analyzeSession(
+  env: Bindings,
+  sessionId: string,
+  hasFollowUpAnswer: boolean,
+) {
+  const identity = await env.DB
     .prepare(
-      `SELECT p.name AS petName FROM sessions s
+      `SELECT p.name AS petName, p.breed FROM sessions s
        JOIN appointments a ON a.id = s.appointment_id
        JOIN pets p ON p.id = a.pet_id WHERE s.id = ?`,
     )
     .bind(sessionId)
-    .first<{ petName: string }>();
-  const turns = await db
+    .first<{ petName: string; breed: string | null }>();
+  const turns = await env.DB
     .prepare("SELECT transcript FROM transcript_turns WHERE session_id = ? ORDER BY created_at, id")
     .bind(sessionId)
     .all<{ transcript: string }>();
   if (!identity || turns.results.length === 0) {
     throw new ApiError(409, "INSUFFICIENT_INPUT", "At least one transcript turn is required.");
   }
-  return analyzeDeterministically({
+  const transcripts = turns.results.map((turn) => turn.transcript);
+  if (env.ANALYZER_MODE === "fake") {
+    return analyzeDeterministically({ petName: identity.petName, transcripts, hasFollowUpAnswer });
+  }
+  const extraction = await new WorkersAIAnalyzer(env.AI as unknown as import("../analysis/workers-ai").AiRunner).analyze({
     petName: identity.petName,
-    transcripts: turns.results.map((turn) => turn.transcript),
+    breed: identity.breed,
+    transcripts,
     hasFollowUpAnswer,
   });
+  if (extraction.needs_follow_up) {
+    return { kind: "follow_up" as const, question: extraction.follow_up_question! };
+  }
+  return {
+    kind: "draft" as const,
+    content: extractionToHandover(extraction),
+    spokenSummary: extraction.concise_spoken_summary,
+  };
 }
 
-async function completeAnalysis(db: D1Database, sessionId: string, hasFollowUpAnswer: boolean) {
-  const analysis = await analyzeSession(db, sessionId, hasFollowUpAnswer);
+async function completeAnalysis(env: Bindings, sessionId: string, hasFollowUpAnswer: boolean) {
+  const analysis = await analyzeSession(env, sessionId, hasFollowUpAnswer);
   if (analysis.kind === "follow_up") {
-    await transitionSession(db, sessionId, "AWAITING_FOLLOWUP");
+    await transitionSession(env.DB, sessionId, "AWAITING_FOLLOWUP");
     return { action: "follow_up" as const, question: analysis.question };
   }
-  const revision = await createDraft(db, {
+  const revision = await createDraft(env.DB, {
     id: crypto.randomUUID(),
     sessionId,
     content: analysis.content,
@@ -181,7 +199,7 @@ api.post("/sessions/:id/complete-round", async (context) => {
   )
     .bind(new Date().toISOString(), id)
     .run();
-  return context.json(await completeAnalysis(context.env.DB, id, false));
+  return context.json(await completeAnalysis(context.env, id, false));
 });
 
 api.post("/sessions/:id/reply", async (context) => {
@@ -196,7 +214,7 @@ api.post("/sessions/:id/reply", async (context) => {
   )
     .bind(new Date().toISOString(), id)
     .run();
-  return context.json(await completeAnalysis(context.env.DB, id, true));
+  return context.json(await completeAnalysis(context.env, id, true));
 });
 
 api.post("/sessions/:id/review", async (context) => {

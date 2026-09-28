@@ -4,7 +4,8 @@
   "main": "src/index.ts",
   "compatibility_date": "2026-09-28",
   "vars": {
-    "APP_ENV": "development"
+    "APP_ENV": "development",
+    "ANALYZER_MODE": "workers-ai"
   },
   "secrets": {
     "required": ["ASSEMBLYAI_API_KEY", "DEMO_API_KEY"]
@@ -21,4 +22,3 @@
     }
   ]
 }
-
