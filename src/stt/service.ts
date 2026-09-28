@@ -106,3 +106,21 @@ export async function issueSttToken(
     throw new ApiError(503, "STT_PROVIDER_UNAVAILABLE", "Temporary transcription credentials are unavailable.");
   }
 }
+
+export async function abandonSttRound(
+  db: D1Database,
+  sessionId: string,
+  roundId: string,
+) {
+  const result = await db.prepare(
+    `UPDATE stt_rounds SET status = 'FAILED', completed_at = ?
+     WHERE id = ? AND session_id = ? AND status = 'OPEN'`,
+  ).bind(new Date().toISOString(), roundId, sessionId).run();
+  if (result.meta.changes === 1) return { closed: true, status: "FAILED" as const };
+
+  const existing = await db.prepare(
+    "SELECT status FROM stt_rounds WHERE id = ? AND session_id = ?",
+  ).bind(roundId, sessionId).first<{ status: string }>();
+  if (!existing) throw new ApiError(404, "STT_ROUND_NOT_FOUND", "The transcription round was not found.");
+  return { closed: false, status: existing.status };
+}

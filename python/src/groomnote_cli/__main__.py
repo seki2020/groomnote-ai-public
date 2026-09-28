@@ -3,7 +3,18 @@ from __future__ import annotations
 import argparse
 import json
 
-from groomnote_cli import GroomNoteClient, __version__, play_wav_bytes
+from groomnote_cli import (
+    GroomNoteClient,
+    __version__,
+    list_microphones,
+    play_wav_bytes,
+    select_microphone,
+)
+from groomnote_cli.streaming import (
+    DirectAssemblyAIStreamingRound,
+    SoundDeviceMicrophone,
+    run_keyboard_round,
+)
 
 
 APPOINTMENTS = {
@@ -51,12 +62,47 @@ def main() -> None:
     parser.add_argument("--demo-key")
     parser.add_argument("--script", choices=sorted(APPOINTMENTS))
     parser.add_argument("--play-speech", action="store_true")
+    parser.add_argument("--list-microphones", action="store_true")
+    parser.add_argument("--microphone", help="Windows input device index or unique name fragment")
+    parser.add_argument("--stream", action="store_true", help="Run direct AssemblyAI microphone STT")
+    parser.add_argument(
+        "--keyboard-turn",
+        action="append",
+        default=[],
+        help="Submit a finalized engineering fallback turn; may be repeated",
+    )
     args = parser.parse_args()
     if args.version:
         print(f"GroomNote CLI {__version__}")
         return
+    if args.list_microphones:
+        for device in list_microphones():
+            print(f"{device.index}: {device.name} ({device.sample_rate} Hz, mono PCM16)")
+        return
     if not (args.base_url and args.demo_key and args.script):
         parser.error("--base-url, --demo-key, and --script are required unless --version is used")
+    if args.stream or args.keyboard_turn:
+        client = GroomNoteClient(args.base_url, args.demo_key)
+        client.create_session(APPOINTMENTS[args.script])
+        if args.keyboard_turn:
+            decision = run_keyboard_round(client, args.keyboard_turn)
+            print(json.dumps({"mode": "keyboard", "decision": decision}, sort_keys=True))
+            return
+        selector: str | int | None = args.microphone
+        device = select_microphone(selector, list_microphones())
+        runner = DirectAssemblyAIStreamingRound(
+            client,
+            SoundDeviceMicrophone(device),
+            on_partial=lambda text: print(f"\r{text}", end="", flush=True),
+            on_ready=lambda: print("Listening. Start speaking now.", flush=True),
+            on_silence_confirmation=lambda: print(
+                "\nAre you finished? Say 'GroomNote, finish this round' when ready."
+            ),
+        )
+        outcome = runner.run_with_recovery()
+        print()
+        print(json.dumps(outcome.__dict__, sort_keys=True))
+        return
     result = run_script(
         GroomNoteClient(args.base_url, args.demo_key), args.script, play_speech=args.play_speech
     )

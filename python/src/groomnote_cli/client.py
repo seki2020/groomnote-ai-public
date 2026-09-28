@@ -58,6 +58,15 @@ class SpeechAudio:
     data: bytes
 
 
+@dataclass(frozen=True)
+class SttToken:
+    token: str
+    round_id: str
+    expires_in_seconds: int
+    max_session_duration_seconds: int
+    websocket_url: str
+
+
 @dataclass
 class GroomNoteClient:
     base_url: str
@@ -102,6 +111,21 @@ class GroomNoteClient:
             "POST",
             f"/v1/sessions/{self.session_id}/turns",
             {"providerTurnId": provider_turn_id, "transcript": transcript},
+        )
+
+    def stt_token(self) -> SttToken:
+        payload = self._request("POST", f"/v1/sessions/{self.session_id}/stt-token", {})
+        return SttToken(
+            token=payload["token"],
+            round_id=payload["roundId"],
+            expires_in_seconds=payload["expiresInSeconds"],
+            max_session_duration_seconds=payload["maxSessionDurationSeconds"],
+            websocket_url=payload["websocketUrl"],
+        )
+
+    def close_stt_round(self, round_id: str) -> dict[str, Any]:
+        return self._request(
+            "POST", f"/v1/sessions/{self.session_id}/stt-rounds/{round_id}/close", {}
         )
 
     def complete_round(self) -> dict[str, Any]:

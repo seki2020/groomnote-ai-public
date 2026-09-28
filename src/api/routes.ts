@@ -23,7 +23,7 @@ import {
   FailingTokenProvider,
   FakeTokenProvider,
 } from "../stt/assemblyai";
-import { issueSttToken } from "../stt/service";
+import { abandonSttRound, issueSttToken } from "../stt/service";
 import { hashCredential, requireDemoCredential, requireSessionCredential } from "./auth";
 import { ApiError } from "./errors";
 import {
@@ -280,6 +280,16 @@ api.post("/sessions/:id/stt-token", async (context) => {
         ? new FailingTokenProvider()
         : new AssemblyAITokenProvider(context.env.ASSEMBLYAI_API_KEY ?? "");
   return context.json(await issueSttToken(context.env.DB, id, provider));
+});
+
+api.post("/sessions/:id/stt-rounds/:roundId/close", async (context) => {
+  const id = sessionIdFrom(context);
+  await requireSessionCredential(context.env.DB, context.req.raw, id);
+  const parsedRoundId = identifierSchema.safeParse(context.req.param("roundId"));
+  if (!parsedRoundId.success) {
+    throw new ApiError(422, "VALIDATION_ERROR", "The transcription round ID is invalid.");
+  }
+  return context.json(await abandonSttRound(context.env.DB, id, parsedRoundId.data));
 });
 
 api.post("/sessions/:id/speech", async (context) => {
