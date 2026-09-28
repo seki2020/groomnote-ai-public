@@ -18,6 +18,12 @@ import {
   transitionSession,
 } from "../state-machine/service";
 import type { Bindings } from "../types";
+import {
+  AssemblyAITokenProvider,
+  FailingTokenProvider,
+  FakeTokenProvider,
+} from "../stt/assemblyai";
+import { issueSttToken } from "../stt/service";
 import { hashCredential, requireDemoCredential, requireSessionCredential } from "./auth";
 import { ApiError } from "./errors";
 import {
@@ -262,6 +268,18 @@ api.post("/sessions/:id/cancel", async (context) => {
   const id = sessionIdFrom(context);
   await requireSessionCredential(context.env.DB, context.req.raw, id);
   return context.json(await cancelSession(context.env.DB, id));
+});
+
+api.post("/sessions/:id/stt-token", async (context) => {
+  const id = sessionIdFrom(context);
+  await requireSessionCredential(context.env.DB, context.req.raw, id);
+  const provider =
+    context.env.STT_TOKEN_MODE === "fake"
+      ? new FakeTokenProvider()
+      : context.env.STT_TOKEN_MODE === "fake-error"
+        ? new FailingTokenProvider()
+        : new AssemblyAITokenProvider(context.env.ASSEMBLYAI_API_KEY ?? "");
+  return context.json(await issueSttToken(context.env.DB, id, provider));
 });
 
 api.post("/sessions/:id/speech", async (context) => {

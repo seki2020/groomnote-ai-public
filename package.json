@@ -6,8 +6,8 @@
   "scripts": {
     "dev": "set XDG_CONFIG_HOME=.wrangler-config&& wrangler dev",
     "typecheck": "tsc --noEmit",
-    "test:unit": "set XDG_CONFIG_HOME=.wrangler-config&& vitest run --config vitest.config.ts",
-    "test:integration": "set XDG_CONFIG_HOME=.wrangler-config&& vitest run --config vitest.integration.config.ts",
+    "test:unit": "set CLOUDFLARE_LOAD_DEV_VARS_FROM_DOT_ENV=false&& set XDG_CONFIG_HOME=.wrangler-config&& vitest run --config vitest.config.ts",
+    "test:integration": "set CLOUDFLARE_LOAD_DEV_VARS_FROM_DOT_ENV=false&& set XDG_CONFIG_HOME=.wrangler-config&& vitest run --config vitest.integration.config.ts",
     "test:python": ".venv\\Scripts\\python.exe -m pytest -p no:cacheprovider python/tests",
     "test:regression": "npm run test:unit && npm run test:integration && npm run test:python",
     "verify": "npm run typecheck && npm run test:regression",
