@@ -9,5 +9,8 @@ export default defineConfig({
   ],
   test: {
     include: ["test/unit/**/*.test.ts"],
+    fileParallelism: false,
+    isolate: false,
+    maxWorkers: 1,
   },
 });

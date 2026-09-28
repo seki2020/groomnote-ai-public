@@ -100,6 +100,32 @@ export type SaveHandoverNoteInput = {
 
 export type HandoverNoteRecord = SaveHandoverNoteInput & { createdAt: string };
 
+export async function getHandoverNoteForSession(
+  db: D1Database,
+  sessionId: string,
+): Promise<HandoverNoteRecord | null> {
+  const validSessionId = identifierSchema.parse(sessionId);
+  const row = await db
+    .prepare(
+      `SELECT id, session_id AS sessionId, appointment_id AS appointmentId,
+              pet_id AS petId, draft_revision AS draftRevision,
+              content_json AS contentJson, created_at AS createdAt
+       FROM handover_notes WHERE session_id = ?`,
+    )
+    .bind(validSessionId)
+    .first<Omit<HandoverNoteRecord, "content"> & { contentJson: string }>();
+  if (!row) return null;
+  return {
+    id: row.id,
+    sessionId: row.sessionId,
+    appointmentId: row.appointmentId,
+    petId: row.petId,
+    draftRevision: row.draftRevision,
+    content: deserializeHandoverContent(row.contentJson),
+    createdAt: row.createdAt,
+  };
+}
+
 export async function saveHandoverNote(
   db: D1Database,
   input: SaveHandoverNoteInput,
@@ -133,25 +159,7 @@ export async function saveHandoverNote(
     )
     .run();
 
-  const row = await db
-    .prepare(
-      `SELECT id, session_id AS sessionId, appointment_id AS appointmentId,
-              pet_id AS petId, draft_revision AS draftRevision,
-              content_json AS contentJson, created_at AS createdAt
-       FROM handover_notes WHERE session_id = ?`,
-    )
-    .bind(validated.sessionId)
-    .first<Omit<HandoverNoteRecord, "content"> & { contentJson: string }>();
+  const row = await getHandoverNoteForSession(db, validated.sessionId);
   if (!row) throw new Error("Handover note save did not produce a row.");
-
-  return {
-    id: row.id,
-    sessionId: row.sessionId,
-    appointmentId: row.appointmentId,
-    petId: row.petId,
-    draftRevision: row.draftRevision,
-    content: deserializeHandoverContent(row.contentJson),
-    createdAt: row.createdAt,
-  };
+  return row;
 }
-
