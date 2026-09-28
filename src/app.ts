@@ -1,10 +1,14 @@
 import { Hono } from "hono";
 import { ZodError } from "zod";
 
+import { ApiError } from "./api/errors";
+import { api } from "./api/routes";
 import { validateRuntimeConfig } from "./config";
 import type { Bindings } from "./types";
 
 export const app = new Hono<{ Bindings: Bindings }>();
+
+app.route("/v1", api);
 
 app.get("/health", (context) => {
   const config = validateRuntimeConfig(context.env);
@@ -28,6 +32,9 @@ app.notFound((context) =>
 );
 
 app.onError((error, context) => {
+  if (error instanceof ApiError) {
+    return context.json({ error: { code: error.code, message: error.message } }, error.status);
+  }
   if (error instanceof ZodError) {
     return context.json(
       {
@@ -50,4 +57,3 @@ app.onError((error, context) => {
     500,
   );
 });
-

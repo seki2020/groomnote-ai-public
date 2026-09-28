@@ -4,7 +4,8 @@
   "main": "src/index.ts",
   "compatibility_date": "2026-09-28",
   "vars": {
-    "APP_ENV": "development"
+    "APP_ENV": "development",
+    "DEMO_API_KEY": "PUBLIC_CONFIGURATION_PLACEHOLDER"
   },
   "d1_databases": [
     {
