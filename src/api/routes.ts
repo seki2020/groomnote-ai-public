@@ -27,6 +27,13 @@ import {
 import { abandonSttRound, completeSttConnection, issueSttToken } from "../stt/service";
 import { hashCredential, requireDemoCredential, requireSessionCredential } from "./auth";
 import { ApiError } from "./errors";
+import { MAX_API_REQUEST_BYTES } from "../security/request";
+import { BUSINESS_SESSION_DURATION_MS, cleanupExpiredSessions } from "../security/session";
+import {
+  assertCorrectionAvailable,
+  assertFollowUpAvailable,
+  reserveProviderInvocation,
+} from "../security/usage";
 import {
   addTurnRequestSchema,
   approveRequestSchema,
@@ -47,8 +54,13 @@ function sessionIdFrom(context: { req: { param(name: string): string } }): strin
 async function parseJson<T>(request: Request, schema: z.ZodType<T>): Promise<T> {
   let value: unknown;
   try {
-    value = await request.json();
-  } catch {
+    const text = await request.text();
+    if (new TextEncoder().encode(text).byteLength > MAX_API_REQUEST_BYTES) {
+      throw new ApiError(413, "REQUEST_TOO_LARGE", "The request body is too large.");
+    }
+    value = JSON.parse(text);
+  } catch (error) {
+    if (error instanceof ApiError) throw error;
     throw new ApiError(400, "INVALID_JSON", "The request body must be valid JSON.");
   }
   const result = schema.safeParse(value);
@@ -162,6 +174,7 @@ async function completeAnalysis(
 ) {
   const analysis = await analyzeSession(env, sessionId, options);
   if (analysis.kind === "follow_up") {
+    await assertFollowUpAvailable(env.DB, sessionId);
     await transitionSession(env.DB, sessionId, "AWAITING_FOLLOWUP");
     await env.DB.prepare(
       `INSERT INTO session_events (id, session_id, event_type, payload_json)
@@ -180,6 +193,7 @@ async function completeAnalysis(
 
 api.post("/sessions", async (context) => {
   await requireDemoCredential(context.req.raw, context.env.DEMO_API_KEY);
+  await cleanupExpiredSessions(context.env.DB);
   const body = await parseJson(context.req.raw, createSessionRequestSchema);
   const appointment = await context.env.DB.prepare(
     `SELECT a.id, p.name AS petName FROM appointments a
@@ -198,7 +212,7 @@ api.post("/sessions", async (context) => {
     .bind(
       id,
       body.appointmentId,
-      new Date(Date.now() + 12 * 60 * 1_000).toISOString(),
+      new Date(Date.now() + BUSINESS_SESSION_DURATION_MS).toISOString(),
       await hashCredential(token),
     )
     .run();
@@ -232,6 +246,11 @@ api.post("/sessions/:id/turns", async (context) => {
 api.post("/sessions/:id/complete-round", async (context) => {
   const id = sessionIdFrom(context);
   await requireSessionCredential(context.env.DB, context.req.raw, id);
+  const session = await getSession(context.env.DB, id);
+  if (session.state !== "COLLECTING") {
+    throw new ApiError(409, "INVALID_STATE", "The session is not collecting turns.");
+  }
+  await reserveProviderInvocation(context.env.DB, id, "llm");
   await transitionSession(context.env.DB, id, "ANALYZING");
   await context.env.DB.prepare(
     "UPDATE stt_rounds SET status = 'COMPLETED', completed_at = ? WHERE session_id = ? AND status = 'OPEN'",
@@ -245,6 +264,11 @@ api.post("/sessions/:id/reply", async (context) => {
   const id = sessionIdFrom(context);
   await requireSessionCredential(context.env.DB, context.req.raw, id);
   const body = await parseJson(context.req.raw, replyRequestSchema);
+  const session = await getSession(context.env.DB, id);
+  if (session.state !== "AWAITING_FOLLOWUP") {
+    throw new ApiError(409, "INVALID_STATE", "The session is not awaiting a follow-up response.");
+  }
+  await reserveProviderInvocation(context.env.DB, id, "llm");
   await transitionSession(context.env.DB, id, "COLLECTING");
   await insertTextTurn(context.env.DB, id, body.providerTurnId, body.transcript);
   await transitionSession(context.env.DB, id, "ANALYZING");
@@ -264,11 +288,13 @@ api.post("/sessions/:id/correct", async (context) => {
   if (session.state !== "AWAITING_APPROVAL" || session.currentDraftRevision < 1) {
     throw new ApiError(409, "INVALID_STATE", "The session is not awaiting a correction.");
   }
+  assertCorrectionAvailable(session.currentDraftRevision);
   const draft = await context.env.DB.prepare(
     "SELECT content_json AS contentJson FROM note_drafts WHERE session_id = ? AND revision = ?",
   ).bind(id, session.currentDraftRevision).first<{ contentJson: string }>();
   if (!draft) throw new ApiError(409, "DRAFT_NOT_FOUND", "The current draft is missing.");
   const currentDraft = deserializeHandoverContent(draft.contentJson);
+  await reserveProviderInvocation(context.env.DB, id, "llm");
   await beginCorrection(context.env.DB, id);
   await insertTextTurn(context.env.DB, id, body.providerTurnId, body.transcript, ["CORRECTING"]);
   await context.env.DB.prepare(

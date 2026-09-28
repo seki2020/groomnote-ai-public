@@ -7,7 +7,7 @@ import {
   type TokenProvider,
 } from "./assemblyai";
 
-export const MAX_STT_TOKEN_ISSUANCES = 6;
+export const MAX_STT_TOKEN_ISSUANCES = 5;
 export const MAX_DAILY_STT_TOKEN_ISSUANCES = 50;
 
 async function releaseQuota(db: D1Database, sessionId: string): Promise<void> {

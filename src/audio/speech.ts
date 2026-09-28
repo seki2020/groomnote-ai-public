@@ -1,8 +1,12 @@
 import { z } from "zod";
 import { ApiError } from "../api/errors";
 import { getSession } from "../state-machine/service";
+import {
+  MAX_TTS_CALLS_PER_SESSION,
+  reserveProviderInvocation,
+} from "../security/usage";
 
-export const MAX_TTS_CALLS_PER_SESSION = 20;
+export { MAX_TTS_CALLS_PER_SESSION } from "../security/usage";
 export const speechKinds = ["opening", "follow_up", "summary", "save_confirmation"] as const;
 export const speechRequestSchema = z.object({
   requestId: z.string().trim().min(1).max(200),
@@ -56,18 +60,19 @@ export async function reserveSpeechRequest(
     "SELECT 1 AS found FROM speech_requests WHERE session_id = ? AND id = ?",
   ).bind(sessionId, request.requestId).first();
   if (duplicate) throw new ApiError(409, "DUPLICATE_SPEECH_REQUEST", "This speech request was already used.");
-  const count = await db.prepare(
-    "SELECT COUNT(*) AS count FROM speech_requests WHERE session_id = ?",
-  ).bind(sessionId).first<{ count: number }>();
-  if ((count?.count ?? 0) >= MAX_TTS_CALLS_PER_SESSION) {
-    throw new ApiError(409, "TTS_QUOTA_EXCEEDED", "The session speech quota is exhausted.");
-  }
   try {
     await db.prepare(
       "INSERT INTO speech_requests (id, session_id, utterance_type) VALUES (?, ?, ?)",
     ).bind(request.requestId, sessionId, request.utterance).run();
   } catch {
     throw new ApiError(409, "DUPLICATE_SPEECH_REQUEST", "This speech request was already used.");
+  }
+  try {
+    await reserveProviderInvocation(db, sessionId, "tts");
+  } catch (error) {
+    await db.prepare("DELETE FROM speech_requests WHERE session_id = ? AND id = ?")
+      .bind(sessionId, request.requestId).run();
+    throw error;
   }
 }
 

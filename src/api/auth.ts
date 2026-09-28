@@ -1,4 +1,5 @@
 import { ApiError } from "./errors";
+import { cleanupExpiredSessions } from "../security/session";
 
 export function bearerToken(request: Request): string {
   const header = request.headers.get("Authorization");
@@ -35,4 +36,11 @@ export async function requireSessionCredential(
     .bind(sessionId, suppliedHash)
     .first<{ id: string }>();
   if (!row) throw new ApiError(403, "SESSION_FORBIDDEN", "The session credential is invalid.");
+  const session = await db.prepare(
+    "SELECT expires_at AS expiresAt FROM sessions WHERE id = ?",
+  ).bind(sessionId).first<{ expiresAt: string }>();
+  if (!session || new Date(session.expiresAt).getTime() <= Date.now()) {
+    await cleanupExpiredSessions(db);
+    throw new ApiError(409, "SESSION_EXPIRED", "The session has expired.");
+  }
 }
