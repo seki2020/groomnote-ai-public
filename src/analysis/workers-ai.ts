@@ -130,8 +130,11 @@ function validateGrounding(
     const supported =
       (normalized === "bath" && /\bbath(?:ed)?\b/.test(source)) ||
       (normalized === "brush" && /\bbrush(?:ed|ing)?\b/.test(source)) ||
-      (normalized === "nail trim" && /\bnail(?:s)?\b/.test(source)) ||
-      source.includes(normalized);
+      (normalized === "ear cleaning" && /\bclean(?:ed|ing)?\s+(?:(?:his|her|their|the)\s+)?ears?\b/.test(source)) ||
+      (/^nail(?:s)? trimm?(?:ing)?$/.test(normalized) &&
+        (/\btrim(?:med|ming)?\s+(?:(?:his|her|their|the)\s+)?nails?\b/.test(source) ||
+          /\bnails?\s+(?:(?:were|was)\s+)?trimmed\b/.test(source))) ||
+      (!/^nail(?:s)? trimm?(?:ing)?$/.test(normalized) && source.includes(normalized));
     if (!supported) throw new Error(`Ungrounded completed service: ${service}`);
   }
   return extraction;

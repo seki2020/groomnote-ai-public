@@ -10,6 +10,7 @@ export interface SttSnapshot {
   partial: string;
   finalTurns: FinalTurn[];
   persisted: number;
+  completedRoundId: string | null;
   round: "NONE" | "OPEN" | "CLOSED";
   error: string;
 }
@@ -39,7 +40,7 @@ export function assemblyAiUrl(credentials: TemporarySttToken): string {
 }
 
 export class SttController {
-  private snapshotValue: SttSnapshot = { state: "IDLE", microphone: "", partial: "", finalTurns: [], persisted: 0, round: "NONE", error: "" };
+  private snapshotValue: SttSnapshot = { state: "IDLE", microphone: "", partial: "", finalTurns: [], persisted: 0, completedRoundId: null, round: "NONE", error: "" };
   private transcript = new TranscriptBuffer();
   private microphone: Microphone | null = null;
   private socket: SocketLike | null = null;
@@ -71,7 +72,7 @@ export class SttController {
     this.finishRequested = false;
     this.terminated = false;
     this.transcript = new TranscriptBuffer();
-    this.update({ state: "REQUESTING_MIC", partial: "", finalTurns: [], persisted: 0, round: "NONE", error: "" });
+    this.update({ state: "REQUESTING_MIC", partial: "", finalTurns: [], persisted: 0, completedRoundId: null, round: "NONE", error: "" });
     try {
       this.microphone = await this.microphoneFactory();
       this.update({ microphone: this.microphone.label });
@@ -170,9 +171,10 @@ export class SttController {
         await this.api.addTurn(this.session, `${this.roundId}:${turn.order}`, turn.transcript);
         this.update({ persisted: this.snapshotValue.persisted + 1 });
       }
-      await this.api.completeConnection(this.session, this.roundId);
+      const completedRoundId = this.roundId;
+      await this.api.completeConnection(this.session, completedRoundId);
       this.roundId = null;
-      this.update({ state: "CLOSED", round: "CLOSED", partial: "" });
+      this.update({ state: "CLOSED", round: "CLOSED", completedRoundId, partial: "" });
     } catch (error) {
       await this.abandonRound();
       this.update({ state: "ERROR", error: error instanceof Error ? error.message : "Transcription finalization failed." });

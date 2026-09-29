@@ -44,6 +44,7 @@ import {
   approveRequestSchema,
   correctionRequestSchema,
   createSessionRequestSchema,
+  completedFollowUpRoundSchema,
   publicSessionRequestSchema,
   replyRequestSchema,
   speechRequestSchema,
@@ -103,10 +104,16 @@ async function insertTextTurn(
   transcript: string,
   allowedStates: readonly string[] = ["COLLECTING"],
 ): Promise<void> {
-  if (!allowedStates.includes((await getSession(db, sessionId)).state)) {
+  const state = (await getSession(db, sessionId)).state;
+  if (!allowedStates.includes(state)) {
     throw new ApiError(409, "INVALID_STATE", "The session is not collecting turns.");
   }
-  const roundId = await ensureRound(db, sessionId);
+  const roundId = state === "AWAITING_FOLLOWUP"
+    ? (await db.prepare(
+        "SELECT id FROM stt_rounds WHERE session_id = ? AND status = 'OPEN' LIMIT 1",
+      ).bind(sessionId).first<{ id: string }>())?.id
+    : await ensureRound(db, sessionId);
+  if (!roundId) throw new ApiError(409, "STT_ROUND_REQUIRED", "Start a follow-up transcription round before submitting turns.");
   await db
     .prepare(
       `INSERT INTO transcript_turns
@@ -116,6 +123,35 @@ async function insertTextTurn(
     )
     .bind(crypto.randomUUID(), sessionId, roundId, providerTurnId, transcript)
     .run();
+}
+
+async function assertNoKnownPetConflict(
+  db: D1Database,
+  sessionId: string,
+  additionalTranscript?: string,
+): Promise<void> {
+  const appointmentPet = await db.prepare(
+    `SELECT p.name FROM sessions s JOIN appointments a ON a.id = s.appointment_id
+     JOIN pets p ON p.id = a.pet_id WHERE s.id = ?`,
+  ).bind(sessionId).first<{ name: string }>();
+  if (!appointmentPet) throw new ApiError(404, "SESSION_NOT_FOUND", "The session was not found.");
+  const turns = await db.prepare(
+    "SELECT transcript FROM transcript_turns WHERE session_id = ?",
+  ).bind(sessionId).all<{ transcript: string }>();
+  const transcript = [...turns.results.map(turn => turn.transcript), additionalTranscript ?? ""].join(" ");
+  const names = new Set<string>();
+  for (const match of transcript.matchAll(/\b([A-Z][a-z]+)\s+(?:was|had|is|received)\b/g)) names.add(match[1]);
+  for (const match of transcript.matchAll(/\bgroomed\s+([A-Z][a-z]+)\b/g)) names.add(match[1]);
+  for (const name of names) {
+    if (name.toLowerCase() === appointmentPet.name.toLowerCase() ||
+        ["he", "she", "it", "they", "we", "i", "this", "that", "today"].includes(name.toLowerCase())) continue;
+    const otherPet = await db.prepare(
+      "SELECT id FROM pets WHERE lower(name) = lower(?) LIMIT 1",
+    ).bind(name).first<{ id: string }>();
+    if (otherPet) {
+      throw new ApiError(409, "PET_IDENTITY_CONFLICT", "The transcript names a different known pet from the appointment. Create the correct session.");
+    }
+  }
 }
 
 async function analyzeSession(
@@ -184,11 +220,14 @@ async function completeAnalysis(
   const analysis = await analyzeSession(env, sessionId, options);
   if (analysis.kind === "follow_up") {
     await assertFollowUpAvailable(env.DB, sessionId);
+    const latestRound = await env.DB.prepare(
+      "SELECT COALESCE(MAX(round_number), 0) AS roundNumber FROM stt_rounds WHERE session_id = ?",
+    ).bind(sessionId).first<{ roundNumber: number }>();
     await transitionSession(env.DB, sessionId, "AWAITING_FOLLOWUP");
     await env.DB.prepare(
       `INSERT INTO session_events (id, session_id, event_type, payload_json)
        VALUES (?, ?, 'FOLLOW_UP_ASKED', ?)`,
-    ).bind(crypto.randomUUID(), sessionId, JSON.stringify({ question: analysis.question })).run();
+    ).bind(crypto.randomUUID(), sessionId, JSON.stringify({ question: analysis.question, afterRoundNumber: latestRound?.roundNumber ?? 0 })).run();
     return { action: "follow_up" as const, question: analysis.question };
   }
   const revision = await createDraft(env.DB, {
@@ -198,6 +237,25 @@ async function completeAnalysis(
     spokenSummary: analysis.spokenSummary,
   });
   return { action: "review" as const, revision };
+}
+
+async function completeAnalysisRecovering(
+  env: Bindings,
+  sessionId: string,
+  restoreState: "COLLECTING" | "AWAITING_FOLLOWUP",
+  options: Parameters<typeof analyzeSession>[2],
+) {
+  try {
+    return await completeAnalysis(env, sessionId, options);
+  } catch (error) {
+    await env.DB.prepare(
+      "UPDATE sessions SET state = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ? AND state = 'ANALYZING'",
+    ).bind(restoreState, sessionId).run();
+    if (error instanceof AnalysisUnavailableError) {
+      throw new ApiError(503, "ANALYSIS_UNAVAILABLE", "Analysis is unavailable. The transcript remains available; try again.");
+    }
+    throw error;
+  }
 }
 
 async function createBusinessSession(db: D1Database, appointmentId: string) {
@@ -287,7 +345,7 @@ api.post("/sessions/:id/turns", async (context) => {
   const id = sessionIdFrom(context);
   await requireSessionCredential(context.env.DB, context.req.raw, id);
   const body = await parseJson(context.req.raw, addTurnRequestSchema);
-  await insertTextTurn(context.env.DB, id, body.providerTurnId, body.transcript);
+  await insertTextTurn(context.env.DB, id, body.providerTurnId, body.transcript, ["COLLECTING", "AWAITING_FOLLOWUP"]);
   return context.json({ accepted: true }, 202);
 });
 
@@ -298,6 +356,7 @@ api.post("/sessions/:id/complete-round", async (context) => {
   if (session.state !== "COLLECTING") {
     throw new ApiError(409, "INVALID_STATE", "The session is not collecting turns.");
   }
+  await assertNoKnownPetConflict(context.env.DB, id);
   await reserveProviderInvocation(context.env.DB, id, "llm");
   await transitionSession(context.env.DB, id, "ANALYZING");
   await context.env.DB.prepare(
@@ -305,7 +364,7 @@ api.post("/sessions/:id/complete-round", async (context) => {
   )
     .bind(new Date().toISOString(), id)
     .run();
-  return context.json(await completeAnalysis(context.env, id, { hasFollowUpAnswer: false }));
+  return context.json(await completeAnalysisRecovering(context.env, id, "COLLECTING", { hasFollowUpAnswer: false }));
 });
 
 api.post("/sessions/:id/reply", async (context) => {
@@ -316,6 +375,7 @@ api.post("/sessions/:id/reply", async (context) => {
   if (session.state !== "AWAITING_FOLLOWUP") {
     throw new ApiError(409, "INVALID_STATE", "The session is not awaiting a follow-up response.");
   }
+  await assertNoKnownPetConflict(context.env.DB, id, body.transcript);
   await reserveProviderInvocation(context.env.DB, id, "llm");
   await transitionSession(context.env.DB, id, "COLLECTING");
   await insertTextTurn(context.env.DB, id, body.providerTurnId, body.transcript);
@@ -325,7 +385,35 @@ api.post("/sessions/:id/reply", async (context) => {
   )
     .bind(new Date().toISOString(), id)
     .run();
-  return context.json(await completeAnalysis(context.env, id, { hasFollowUpAnswer: true }));
+  return context.json(await completeAnalysisRecovering(context.env, id, "AWAITING_FOLLOWUP", { hasFollowUpAnswer: true }));
+});
+
+api.post("/sessions/:id/complete-follow-up-round", async (context) => {
+  const id = sessionIdFrom(context);
+  await requireSessionCredential(context.env.DB, context.req.raw, id);
+  const body = await parseJson(context.req.raw, completedFollowUpRoundSchema);
+  const session = await getSession(context.env.DB, id);
+  if (session.state !== "AWAITING_FOLLOWUP") {
+    throw new ApiError(409, "INVALID_STATE", "The session is not awaiting a follow-up response.");
+  }
+  const latestQuestion = await context.env.DB.prepare(
+    "SELECT payload_json AS payloadJson FROM session_events WHERE session_id = ? AND event_type = 'FOLLOW_UP_ASKED' ORDER BY created_at DESC, rowid DESC LIMIT 1",
+  ).bind(id).first<{ payloadJson: string }>();
+  const marker = latestQuestion ? JSON.parse(latestQuestion.payloadJson) as { afterRoundNumber?: unknown } : null;
+  const round = await context.env.DB.prepare(
+    `SELECT r.round_number AS roundNumber, r.status, COUNT(t.id) AS turnCount
+     FROM stt_rounds r LEFT JOIN transcript_turns t ON t.stt_round_id = r.id
+     WHERE r.id = ? AND r.session_id = ? GROUP BY r.id`,
+  ).bind(body.roundId, id).first<{ roundNumber: number; status: string; turnCount: number }>();
+  if (!round || round.status !== "COMPLETED" || round.turnCount < 1 ||
+      typeof marker?.afterRoundNumber !== "number" || round.roundNumber <= marker.afterRoundNumber) {
+    throw new ApiError(409, "FOLLOW_UP_ROUND_REQUIRED", "A completed new follow-up transcription round is required.");
+  }
+  await assertNoKnownPetConflict(context.env.DB, id);
+  await reserveProviderInvocation(context.env.DB, id, "llm");
+  await transitionSession(context.env.DB, id, "COLLECTING");
+  await transitionSession(context.env.DB, id, "ANALYZING");
+  return context.json(await completeAnalysisRecovering(context.env, id, "AWAITING_FOLLOWUP", { hasFollowUpAnswer: true }));
 });
 
 api.post("/sessions/:id/correct", async (context) => {
