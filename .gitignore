@@ -11,6 +11,7 @@ __pycache__/
 *.egg-info/
 *.tsbuildinfo
 web/public/live-speech.wav
+web/public/live-w05-*.wav
 .venv/
 .dev.vars*
 .env*

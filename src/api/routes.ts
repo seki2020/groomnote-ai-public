@@ -4,6 +4,7 @@ import { analyzeDeterministically } from "../analysis/fake-llm";
 import {
   AnalysisUnavailableError,
   extractionToHandover,
+  safeAnalysisFailureDiagnostics,
   WorkersAIAnalyzer,
 } from "../analysis/workers-ai";
 import { fakeMp3, fakeWav, MP3_CONTENT_TYPE, WAV_CONTENT_TYPE, WorkersAITts } from "../audio/tts";
@@ -28,7 +29,13 @@ import {
   FailingTokenProvider,
   FakeTokenProvider,
 } from "../stt/assemblyai";
-import { abandonSttRound, completeSttConnection, issueSttToken } from "../stt/service";
+import {
+  abandonSttRound,
+  completeSttConnection,
+  issueSttToken,
+  resolveDailySttTokenIssuanceLimit,
+  resolveSessionSttTokenIssuanceLimit,
+} from "../stt/service";
 import { hashCredential, requireDemoCredential, requireSessionCredential } from "./auth";
 import { ApiError } from "./errors";
 import { MAX_API_REQUEST_BYTES } from "../security/request";
@@ -252,6 +259,9 @@ async function completeAnalysisRecovering(
       "UPDATE sessions SET state = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ? AND state = 'ANALYZING'",
     ).bind(restoreState, sessionId).run();
     if (error instanceof AnalysisUnavailableError) {
+      if (env.APP_ENV === "development" && env.ANALYZER_MODE === "workers-ai") {
+        console.warn("Workers AI analysis exhausted bounded retries.", safeAnalysisFailureDiagnostics(error));
+      }
       throw new ApiError(503, "ANALYSIS_UNAVAILABLE", "Analysis is unavailable. The transcript remains available; try again.");
     }
     throw error;
@@ -444,6 +454,9 @@ api.post("/sessions/:id/correct", async (context) => {
     }));
   } catch (error) {
     if (!(error instanceof AnalysisUnavailableError)) throw error;
+    if (context.env.APP_ENV === "development" && context.env.ANALYZER_MODE === "workers-ai") {
+      console.warn("Workers AI correction exhausted bounded retries.", safeAnalysisFailureDiagnostics(error));
+    }
     const results = await context.env.DB.batch([
       context.env.DB.prepare(
         "DELETE FROM transcript_turns WHERE session_id = ? AND provider_turn_id = ?",
@@ -508,7 +521,15 @@ api.post("/sessions/:id/stt-token", async (context) => {
       : context.env.STT_TOKEN_MODE === "fake-error"
         ? new FailingTokenProvider()
         : new AssemblyAITokenProvider(context.env.ASSEMBLYAI_API_KEY ?? "");
-  return context.json(await issueSttToken(context.env.DB, id, provider));
+  const sessionIssuanceLimit = resolveSessionSttTokenIssuanceLimit(
+    context.env.APP_ENV,
+    context.env.DEV_STT_SESSION_TOKEN_ISSUANCE_LIMIT,
+  );
+  const dailyIssuanceLimit = resolveDailySttTokenIssuanceLimit(
+    context.env.APP_ENV,
+    context.env.DEV_STT_DAILY_TOKEN_ISSUANCE_LIMIT,
+  );
+  return context.json(await issueSttToken(context.env.DB, id, provider, sessionIssuanceLimit, dailyIssuanceLimit));
 });
 
 api.post("/sessions/:id/stt-rounds/:roundId/close", async (context) => {

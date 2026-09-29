@@ -9,6 +9,44 @@ import {
 
 export const MAX_STT_TOKEN_ISSUANCES = 5;
 export const MAX_DAILY_STT_TOKEN_ISSUANCES = 50;
+const MAX_DEVELOPMENT_STT_TOKEN_ISSUANCES = 20;
+const MAX_DEVELOPMENT_DAILY_STT_TOKEN_ISSUANCES = 500;
+
+export function resolveSessionSttTokenIssuanceLimit(
+  appEnv: string,
+  developmentOverride?: string,
+): number {
+  if (appEnv !== "development" || developmentOverride === undefined) {
+    return MAX_STT_TOKEN_ISSUANCES;
+  }
+  const configured = developmentOverride.trim();
+  if (!/^\d+$/.test(configured)) {
+    throw new Error("Development STT session token issuance limit must be an integer from 1 to 20.");
+  }
+  const parsed = Number(configured);
+  if (!Number.isSafeInteger(parsed) || parsed < 1 || parsed > MAX_DEVELOPMENT_STT_TOKEN_ISSUANCES) {
+    throw new Error("Development STT session token issuance limit must be an integer from 1 to 20.");
+  }
+  return parsed;
+}
+
+export function resolveDailySttTokenIssuanceLimit(
+  appEnv: string,
+  developmentOverride?: string,
+): number {
+  if (appEnv !== "development" || developmentOverride === undefined) {
+    return MAX_DAILY_STT_TOKEN_ISSUANCES;
+  }
+  const configured = developmentOverride.trim();
+  if (!/^\d+$/.test(configured)) {
+    throw new Error("Development STT daily token issuance limit must be an integer from 1 to 500.");
+  }
+  const parsed = Number(configured);
+  if (!Number.isSafeInteger(parsed) || parsed < 1 || parsed > MAX_DEVELOPMENT_DAILY_STT_TOKEN_ISSUANCES) {
+    throw new Error("Development STT daily token issuance limit must be an integer from 1 to 500.");
+  }
+  return parsed;
+}
 
 async function releaseQuota(db: D1Database, sessionId: string): Promise<void> {
   await db.batch([
@@ -24,7 +62,12 @@ async function releaseQuota(db: D1Database, sessionId: string): Promise<void> {
   ]);
 }
 
-async function reserveRound(db: D1Database, sessionId: string): Promise<string> {
+async function reserveRound(
+  db: D1Database,
+  sessionId: string,
+  sessionIssuanceLimit: number,
+  dailyIssuanceLimit: number,
+): Promise<string> {
   const session = await getSession(db, sessionId);
   if (new Date(session.expiresAt).getTime() <= Date.now()) {
     throw new ApiError(409, "SESSION_EXPIRED", "The session has expired.");
@@ -43,7 +86,7 @@ async function reserveRound(db: D1Database, sessionId: string): Promise<string> 
     `UPDATE usage_quotas SET stt_token_issuances = stt_token_issuances + 1,
        updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
      WHERE session_id = ? AND stt_token_issuances < ?`,
-  ).bind(sessionId, MAX_STT_TOKEN_ISSUANCES).run();
+  ).bind(sessionId, sessionIssuanceLimit).run();
   if (quota.meta.changes !== 1) {
     throw new ApiError(429, "STT_TOKEN_QUOTA_EXCEEDED", "The session token quota is exhausted.");
   }
@@ -56,7 +99,7 @@ async function reserveRound(db: D1Database, sessionId: string): Promise<string> 
     `UPDATE daily_stt_usage SET token_issuances = token_issuances + 1,
        updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
      WHERE quota_date = date('now') AND token_issuances < ?`,
-  ).bind(MAX_DAILY_STT_TOKEN_ISSUANCES).run();
+  ).bind(dailyIssuanceLimit).run();
   if (dailyQuota.meta.changes !== 1) {
     await db.prepare(
       `UPDATE usage_quotas SET stt_token_issuances = stt_token_issuances - 1
@@ -84,8 +127,10 @@ export async function issueSttToken(
   db: D1Database,
   sessionId: string,
   provider: TokenProvider,
+  sessionIssuanceLimit = MAX_STT_TOKEN_ISSUANCES,
+  dailyIssuanceLimit = MAX_DAILY_STT_TOKEN_ISSUANCES,
 ) {
-  const roundId = await reserveRound(db, sessionId);
+  const roundId = await reserveRound(db, sessionId, sessionIssuanceLimit, dailyIssuanceLimit);
   try {
     const token = await provider.createToken();
     return {

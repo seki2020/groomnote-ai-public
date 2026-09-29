@@ -5,6 +5,7 @@ import { TranscriptBuffer, type FinalTurn } from "./transcript";
 import type { SttWorkerApi, TemporarySttToken } from "./workerApi";
 
 export type SttState = "IDLE" | "REQUESTING_MIC" | "REQUESTING_TOKEN" | "CONNECTING" | "LISTENING" | "FINALIZING" | "CLOSED" | "ERROR";
+export type SttCaptureMode = "business" | "review" | "correction";
 export interface SttSnapshot {
   state: SttState;
   microphone: string;
@@ -14,6 +15,8 @@ export interface SttSnapshot {
   completedRoundId: string | null;
   round: "NONE" | "OPEN" | "CLOSED";
   error: string;
+  captureMode: SttCaptureMode;
+  capturedText: string;
 }
 
 export interface SocketLike {
@@ -41,7 +44,7 @@ export function assemblyAiUrl(credentials: TemporarySttToken): string {
 }
 
 export class SttController {
-  private snapshotValue: SttSnapshot = { state: "IDLE", microphone: "", partial: "", finalTurns: [], persisted: 0, completedRoundId: null, round: "NONE", error: "" };
+  private snapshotValue: SttSnapshot = { state: "IDLE", microphone: "", partial: "", finalTurns: [], persisted: 0, completedRoundId: null, round: "NONE", error: "", captureMode: "business", capturedText: "" };
   private transcript = new TranscriptBuffer();
   private microphone: Microphone | null = null;
   private socket: SocketLike | null = null;
@@ -52,6 +55,7 @@ export class SttController {
   private terminateResolve: (() => void) | null = null;
   private terminateReject: ((error: Error) => void) | null = null;
   private terminated = false;
+  private captureMode: SttCaptureMode = "business";
 
   constructor(
     private readonly session: BrowserSession,
@@ -69,16 +73,21 @@ export class SttController {
     this.notify(this.snapshotValue);
   }
 
-  async start(): Promise<void> {
+  async start(mode: SttCaptureMode = "business"): Promise<void> {
     if (!["IDLE", "CLOSED", "ERROR"].includes(this.snapshotValue.state)) return;
+    if (this.roundId) {
+      this.update({ state: "ERROR", error: "Finish or discard the previous voice action before starting another round." });
+      return;
+    }
     if (this.audioGate && !this.audioGate.acquire("stt")) {
       this.update({ state: "ERROR", error: "Stop speech playback before starting the microphone." });
       return;
     }
     this.finishRequested = false;
+    this.captureMode = mode;
     this.terminated = false;
     this.transcript = new TranscriptBuffer();
-    this.update({ state: "REQUESTING_MIC", partial: "", finalTurns: [], persisted: 0, completedRoundId: null, round: "NONE", error: "" });
+    this.update({ state: "REQUESTING_MIC", partial: "", finalTurns: [], capturedText: "", captureMode: mode, persisted: 0, completedRoundId: null, round: "NONE", error: "" });
     try {
       this.microphone = await this.microphoneFactory();
       this.update({ microphone: this.microphone.label });
@@ -173,20 +182,44 @@ export class SttController {
       const termination = new Promise<void>((resolve, reject) => { this.terminateResolve = resolve; this.terminateReject = reject; });
       this.socket.send(JSON.stringify({ type: "Terminate" }));
       await Promise.race([termination, new Promise<never>((_, reject) => setTimeout(() => reject(new Error("Transcription finalization timed out.")), TERMINATION_WAIT_MS))]);
-      for (const turn of this.transcript.finalTurns) {
-        await this.api.addTurn(this.session, `${this.roundId}:${turn.order}`, turn.transcript);
-        this.update({ persisted: this.snapshotValue.persisted + 1 });
-      }
       const completedRoundId = this.roundId;
-      await this.api.completeConnection(this.session, completedRoundId);
-      this.roundId = null;
-      this.update({ state: "CLOSED", round: "CLOSED", completedRoundId, partial: "" });
+      const finalTurns = this.transcript.finalTurns;
+      const capturedText = finalTurns.map(turn => turn.transcript).join(" ").trim();
+      if (this.captureMode === "business") {
+        for (const turn of finalTurns) {
+          await this.api.addTurn(this.session, `${completedRoundId}:${turn.order}`, turn.transcript);
+          this.update({ persisted: this.snapshotValue.persisted + 1 });
+        }
+        await this.api.completeConnection(this.session, completedRoundId);
+        this.roundId = null;
+      }
+      this.update({ state: "CLOSED", round: this.captureMode === "business" ? "CLOSED" : "OPEN", completedRoundId, capturedText, partial: "" });
     } catch (error) {
       await this.abandonRound();
       this.update({ state: "ERROR", error: error instanceof Error ? error.message : "Transcription finalization failed." });
     } finally {
       await this.release();
     }
+  }
+
+  async completeBufferedCapture(): Promise<void> {
+    const id = this.roundId;
+    if (!id || this.captureMode === "business" || this.snapshotValue.state !== "CLOSED") return;
+    await this.api.completeConnection(this.session, id);
+    this.roundId = null;
+    this.update({ round: "CLOSED" });
+  }
+
+  acknowledgeBufferedCaptureConsumed(roundId: string): void {
+    if (this.roundId !== roundId || this.captureMode === "business") return;
+    this.roundId = null;
+    this.update({ round: "CLOSED" });
+  }
+
+  async discardBufferedCapture(): Promise<void> {
+    if (!this.roundId || this.captureMode === "business") return;
+    await this.abandonRound();
+    this.update({ state: "CLOSED", round: "CLOSED" });
   }
 
   private async failConnected() {

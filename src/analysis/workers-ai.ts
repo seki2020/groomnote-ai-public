@@ -32,7 +32,7 @@ export const groomingJsonSchema = {
   type: "object",
   additionalProperties: false,
   properties: {
-    pet_name: { type: "string" },
+    pet_name: { type: "string", minLength: 1 },
     breed: { type: ["string", "null"] },
     identity_status: { type: "string", enum: ["matched", "ambiguous", "unknown"] },
     services_completed: { type: "array", items: { type: "string" } },
@@ -46,7 +46,7 @@ export const groomingJsonSchema = {
     next_visit_instructions: { type: "array", items: { type: "string" } },
     unresolved_items: { type: "array", items: { type: "string" } },
     full_internal_handover: { type: "string" },
-    concise_spoken_summary: { type: "string" },
+    concise_spoken_summary: { type: "string", minLength: 1, maxLength: 900 },
     needs_follow_up: { type: "boolean" },
     follow_up_question: { type: ["string", "null"] },
   },
@@ -75,11 +75,52 @@ export interface AiRunner {
   run(model: string, input: Record<string, unknown>): Promise<unknown>;
 }
 
+export type AnalysisFailureStage = "provider" | "schema" | "semantic" | "grounding";
+type GroundingFailureReason = "tool_context_as_service" | "unsupported_completed_service";
+type GroundingServiceCategory = "bath" | "brush" | "ear_cleaning" | "nail_trim" | "tool" | "other";
+
+class GroundingValidationError extends Error {
+  constructor(
+    readonly reason: GroundingFailureReason,
+    readonly serviceCategory: GroundingServiceCategory,
+  ) {
+    super("Grounding validation rejected a completed service.");
+    this.name = "GroundingValidationError";
+  }
+}
+
 export class AnalysisUnavailableError extends Error {
-  constructor(cause?: unknown) {
+  constructor(
+    cause?: unknown,
+    readonly failureStage: AnalysisFailureStage = "provider",
+  ) {
     super("Workers AI returned invalid structured grooming output.", { cause });
     this.name = "AnalysisUnavailableError";
   }
+}
+
+export function safeAnalysisFailureDiagnostics(error: AnalysisUnavailableError) {
+  const cause = error.cause;
+  const candidate = typeof cause === "object" && cause !== null
+    ? cause as { name?: unknown; status?: unknown; statusCode?: unknown }
+    : undefined;
+  const causeName = cause instanceof z.ZodError
+    ? "ZodError"
+    : cause instanceof Error
+      ? "Error"
+      : typeof cause;
+  const status = typeof candidate?.status === "number"
+    ? candidate.status
+    : candidate?.statusCode;
+  return {
+    stage: error.failureStage,
+    causeName,
+    ...(typeof status === "number" && status >= 400 && status <= 599 ? { causeStatus: status } : {}),
+    ...(cause instanceof z.ZodError ? { schemaIssueCount: cause.issues.length } : {}),
+    ...(cause instanceof GroundingValidationError
+      ? { groundingReason: cause.reason, serviceCategory: cause.serviceCategory }
+      : {}),
+  };
 }
 
 export type AnalysisInput = {
@@ -92,6 +133,8 @@ export type AnalysisInput = {
 };
 
 const systemPrompt = "PRIVATE_PROMPT_NOT_INCLUDED";
+
+const correctionPrompt = "PRIVATE_PROMPT_NOT_INCLUDED";
 
 function responsePayload(value: unknown): unknown {
   if (typeof value === "object" && value !== null && "response" in value) {
@@ -117,15 +160,40 @@ function validateSemanticRules(extraction: GroomingExtraction): GroomingExtracti
   return extraction;
 }
 
+function correctionExplicitlyAddsNailTrim(correctionInstruction?: string): boolean {
+  if (!correctionInstruction) return false;
+  const nailTrim = String.raw`(?:the\s+)?nails?\s+(?:trim|trimming|clip|clipping)`;
+  const positiveAddition = new RegExp(String.raw`\b(?:add|include)\s+${nailTrim}\b`, "i");
+  const negatedAddition = new RegExp(String.raw`\b(?:do not|don't|never|not)\s+(?:add|include)\s+${nailTrim}\b`, "i");
+  const explicitlyNotCompleted = new RegExp(
+    String.raw`(?:\b${nailTrim}\b[^.!?]{0,40}\b(?:not completed|not done|not performed|unfinished)\b|\b(?:not completed|not done|not performed|unfinished)\b[^.!?]{0,40}\b${nailTrim}\b)`,
+    "i",
+  );
+  return positiveAddition.test(correctionInstruction) &&
+    !negatedAddition.test(correctionInstruction) &&
+    !explicitlyNotCompleted.test(correctionInstruction);
+}
+
+function groundingServiceCategory(service: string): GroundingServiceCategory {
+  const normalized = service.trim().toLowerCase();
+  if (normalized === "bath") return "bath";
+  if (normalized === "brush") return "brush";
+  if (normalized === "ear cleaning") return "ear_cleaning";
+  if (/^nail(?:s)? trimm?(?:ing)?$/.test(normalized)) return "nail_trim";
+  if (["dryer", "clippers", "scissors", "grooming table"].includes(normalized)) return "tool";
+  return "other";
+}
+
 function validateGrounding(
   extraction: GroomingExtraction,
   transcripts: readonly string[],
+  correctionInstruction?: string,
 ): GroomingExtraction {
   const source = transcripts.join(" ").toLowerCase();
   for (const service of extraction.services_completed) {
     const normalized = service.toLowerCase();
     if (["dryer", "clippers", "scissors", "grooming table"].includes(normalized)) {
-      throw new Error(`Tool or context misclassified as service: ${service}`);
+      throw new GroundingValidationError("tool_context_as_service", "tool");
     }
     const supported =
       (normalized === "bath" && /\bbath(?:ed)?\b/.test(source)) ||
@@ -133,9 +201,12 @@ function validateGrounding(
       (normalized === "ear cleaning" && /\bclean(?:ed|ing)?\s+(?:(?:his|her|their|the)\s+)?ears?\b/.test(source)) ||
       (/^nail(?:s)? trimm?(?:ing)?$/.test(normalized) &&
         (/\btrim(?:med|ming)?\s+(?:(?:his|her|their|the)\s+)?nails?\b/.test(source) ||
-          /\bnails?\s+(?:(?:were|was)\s+)?trimmed\b/.test(source))) ||
+          /\bnails?\s+(?:(?:were|was)\s+)?trimmed\b/.test(source) ||
+          correctionExplicitlyAddsNailTrim(correctionInstruction))) ||
       (!/^nail(?:s)? trimm?(?:ing)?$/.test(normalized) && source.includes(normalized));
-    if (!supported) throw new Error(`Ungrounded completed service: ${service}`);
+    if (!supported) {
+      throw new GroundingValidationError("unsupported_completed_service", groundingServiceCategory(service));
+    }
   }
   return extraction;
 }
@@ -147,6 +218,7 @@ export class WorkersAIAnalyzer {
     // Public technical showcase: the owner's private model instructions are omitted.
     throw new Error("PRIVATE_PROMPT_NOT_INCLUDED: this showcase cannot run live analysis.");
 
+    const prompt = input.correctionInstruction && input.currentDraft ? correctionPrompt : systemPrompt;
     const userPayload = {
       known_identity: { pet_name: input.petName, breed: input.breed },
       transcript_turns: input.transcripts,
@@ -155,9 +227,11 @@ export class WorkersAIAnalyzer {
       current_draft: input.currentDraft ?? null,
     };
     let lastError: unknown;
+    let lastFailureStage: AnalysisFailureStage = "provider";
     for (let attempt = 0; attempt < 2; attempt += 1) {
+      let response: unknown;
       try {
-        const response = await this.ai.run(WORKERS_AI_MODEL, {
+        response = await this.ai.run(WORKERS_AI_MODEL, {
           messages: [
             { role: "system", content: "PRIVATE_PROMPT_NOT_INCLUDED" },
             {
@@ -169,15 +243,35 @@ export class WorkersAIAnalyzer {
           temperature: 0,
           max_tokens: 1_200,
         });
-        return validateGrounding(
-          validateSemanticRules(groomingExtractionSchema.parse(responsePayload(response))),
-          input.transcripts,
-        );
       } catch (error) {
         lastError = error;
+        lastFailureStage = "provider";
+        continue;
+      }
+
+      let extraction: GroomingExtraction;
+      try {
+        extraction = groomingExtractionSchema.parse(responsePayload(response));
+      } catch (error) {
+        lastError = error;
+        lastFailureStage = "schema";
+        continue;
+      }
+      try {
+        extraction = validateSemanticRules(extraction);
+      } catch (error) {
+        lastError = error;
+        lastFailureStage = "semantic";
+        continue;
+      }
+      try {
+        return validateGrounding(extraction, input.transcripts, input.correctionInstruction);
+      } catch (error) {
+        lastError = error;
+        lastFailureStage = "grounding";
       }
     }
-    throw new AnalysisUnavailableError(lastError);
+    throw new AnalysisUnavailableError(lastError, lastFailureStage);
   }
 }
 

@@ -1,6 +1,6 @@
 import type { BrowserSession } from "../api";
 
-export type SpeechKind = "opening" | "follow_up" | "summary";
+export type SpeechKind = "opening" | "follow_up" | "summary" | "save_confirmation";
 export interface SpeechAudio { bytes: ArrayBuffer; contentType: "audio/wav" | "audio/mpeg" }
 
 export class SpeechApiError extends Error {
