@@ -2,12 +2,14 @@ import { useEffect, useState } from "react";
 import { apiBaseUrl, getHealth } from "../services/api";
 import { useBrowserSession } from "../hooks/useBrowserSession";
 import { TurnstileWidget } from "../components/TurnstileWidget";
+import { useStt } from "../hooks/useStt";
 
 export function App({ baseUrl = apiBaseUrl(import.meta.env.VITE_API_BASE_URL), fetcher = fetch }: { baseUrl?: string; fetcher?: typeof fetch }) {
   const [status, setStatus] = useState<"Checking..." | "Healthy" | "Unavailable">("Checking...");
   const [appointmentId, setAppointmentId] = useState("");
   const [turnstileToken, setTurnstileToken] = useState("");
   const browserSession = useBrowserSession(baseUrl, fetcher);
+  const stt = useStt(browserSession.session, baseUrl, fetcher);
   const siteKey = import.meta.env.VITE_TURNSTILE_SITE_KEY || (import.meta.env.DEV ? "1x00000000000000000000AA" : "");
 
   useEffect(() => {
@@ -32,5 +34,18 @@ export function App({ baseUrl = apiBaseUrl(import.meta.env.VITE_API_BASE_URL), f
       {browserSession.error && <p role="alert">{browserSession.error}</p>}
       {browserSession.session && <><p>Session: {browserSession.session.id}</p><p>Business state: {browserSession.session.state}</p><p>Credential: READY</p></>}
     </section>
+    {browserSession.session && <section aria-label="Streaming transcription">
+      <h2>STT</h2>
+      <p>STT state: <span data-testid="stt-state">{stt.snapshot.state}</span></p>
+      <p>Microphone: {stt.snapshot.microphone || "None"}</p>
+      <button disabled={!(["IDLE", "CLOSED", "ERROR"].includes(stt.snapshot.state))} onClick={() => { void stt.start(); }}>Start Listening</button>
+      <button disabled={!(["CONNECTING", "LISTENING"].includes(stt.snapshot.state))} onClick={() => { void stt.finish(); }}>Finish STT Round</button>
+      <p>Partial: <span data-testid="partial-transcript">{stt.snapshot.partial}</span></p>
+      <h3>Final transcript</h3>
+      <ol>{stt.snapshot.finalTurns.map(turn => <li key={turn.order}>Turn {turn.order + 1}: {turn.transcript}</li>)}</ol>
+      <p>Round: {stt.snapshot.round}</p>
+      <p>Persisted finalized turns: {stt.snapshot.persisted}</p>
+      {stt.snapshot.error && <p role="alert">{stt.snapshot.error}</p>}
+    </section>}
   </main>;
 }
