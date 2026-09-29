@@ -33,6 +33,7 @@ import { hashCredential, requireDemoCredential, requireSessionCredential } from 
 import { ApiError } from "./errors";
 import { MAX_API_REQUEST_BYTES } from "../security/request";
 import { BUSINESS_SESSION_DURATION_MS, cleanupExpiredSessions } from "../security/session";
+import { verifyTurnstile } from "../security/turnstile";
 import {
   assertCorrectionAvailable,
   assertFollowUpAvailable,
@@ -43,6 +44,7 @@ import {
   approveRequestSchema,
   correctionRequestSchema,
   createSessionRequestSchema,
+  publicSessionRequestSchema,
   replyRequestSchema,
   speechRequestSchema,
 } from "./schemas";
@@ -198,42 +200,81 @@ async function completeAnalysis(
   return { action: "review" as const, revision };
 }
 
-api.post("/sessions", async (context) => {
-  await requireDemoCredential(context.req.raw, context.env.DEMO_API_KEY);
-  await cleanupExpiredSessions(context.env.DB);
-  const body = await parseJson(context.req.raw, createSessionRequestSchema);
-  const appointment = await context.env.DB.prepare(
+async function createBusinessSession(db: D1Database, appointmentId: string) {
+  const appointment = await db.prepare(
     `SELECT a.id, p.name AS petName FROM appointments a
      JOIN pets p ON p.id = a.pet_id WHERE a.id = ?`,
   )
-    .bind(body.appointmentId)
+    .bind(appointmentId)
     .first<{ id: string; petName: string }>();
   if (!appointment) throw new ApiError(404, "APPOINTMENT_NOT_FOUND", "Appointment not found.");
 
   const id = crypto.randomUUID();
   const token = `${crypto.randomUUID()}${crypto.randomUUID()}`.replaceAll("-", "");
-  await context.env.DB.prepare(
+  await db.prepare(
     `INSERT INTO sessions (id, appointment_id, state, expires_at, session_token_hash)
      VALUES (?, ?, 'CREATED', ?, ?)`,
   )
     .bind(
       id,
-      body.appointmentId,
+      appointmentId,
       new Date(Date.now() + BUSINESS_SESSION_DURATION_MS).toISOString(),
       await hashCredential(token),
     )
     .run();
-  await transitionSession(context.env.DB, id, "OPENING");
-  await transitionSession(context.env.DB, id, "COLLECTING");
-  return context.json(
-    {
+  await transitionSession(db, id, "OPENING");
+  await transitionSession(db, id, "COLLECTING");
+  return {
       id,
       sessionToken: token,
       state: "COLLECTING",
       openingPrompt: "PUBLIC_OPENING_COPY_PLACEHOLDER",
-    },
-    201,
-  );
+    };
+}
+
+api.post("/sessions", async (context) => {
+  await requireDemoCredential(context.req.raw, context.env.DEMO_API_KEY);
+  await cleanupExpiredSessions(context.env.DB);
+  const body = await parseJson(context.req.raw, createSessionRequestSchema);
+  return context.json(await createBusinessSession(context.env.DB, body.appointmentId), 201);
+});
+
+const MAX_DAILY_PUBLIC_SESSIONS = 100;
+
+api.post("/public/sessions", async (context) => {
+  const origin = context.req.header("Origin");
+  if (!origin || origin !== context.env.CORS_ALLOWED_ORIGIN) {
+    throw new ApiError(403, "ORIGIN_FORBIDDEN", "This browser origin is not allowed.");
+  }
+  const body = await parseJson(context.req.raw, publicSessionRequestSchema);
+  // Avoid Siteverify traffic when the local business-session quota is already full.
+  const usage = await context.env.DB.prepare(
+    "SELECT session_creations AS count FROM daily_public_session_usage WHERE quota_date = date('now')",
+  ).first<{ count: number }>();
+  if ((usage?.count ?? 0) >= MAX_DAILY_PUBLIC_SESSIONS) {
+    throw new ApiError(429, "PUBLIC_SESSION_QUOTA_EXCEEDED", "The daily browser session limit is exhausted.");
+  }
+  await verifyTurnstile(body.turnstileToken, context.env.TURNSTILE_SECRET_KEY, origin, fetch, context.env.APP_ENV !== "production");
+  await cleanupExpiredSessions(context.env.DB);
+  await context.env.DB.prepare(
+    "INSERT OR IGNORE INTO daily_public_session_usage (quota_date) VALUES (date('now'))",
+  ).run();
+  const reserved = await context.env.DB.prepare(
+    `UPDATE daily_public_session_usage SET session_creations = session_creations + 1,
+       updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+     WHERE quota_date = date('now') AND session_creations < ?`,
+  ).bind(MAX_DAILY_PUBLIC_SESSIONS).run();
+  if (reserved.meta.changes !== 1) {
+    throw new ApiError(429, "PUBLIC_SESSION_QUOTA_EXCEEDED", "The daily browser session limit is exhausted.");
+  }
+  try {
+    return context.json(await createBusinessSession(context.env.DB, body.appointmentId), 201);
+  } catch (error) {
+    await context.env.DB.prepare(
+      "UPDATE daily_public_session_usage SET session_creations = session_creations - 1 WHERE quota_date = date('now') AND session_creations > 0",
+    ).run();
+    throw error;
+  }
 });
 
 api.get("/sessions/:id", async (context) => {

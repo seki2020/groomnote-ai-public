@@ -4,6 +4,31 @@ export interface HealthResponse {
   environment: string;
 }
 
+export interface BrowserSession {
+  id: string;
+  sessionToken: string;
+  state: "COLLECTING";
+  openingPrompt: string;
+}
+
+export async function createPublicSession(baseUrl: string, appointmentId: string, turnstileToken: string, fetcher: typeof fetch = fetch): Promise<BrowserSession> {
+  const response = await fetcher(`${baseUrl}/v1/public/sessions`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ appointmentId, turnstileToken }),
+  });
+  if (!response.ok) throw new Error(`Session creation failed (${response.status})`);
+  const value: unknown = await response.json();
+  if (!value || typeof value !== "object") throw new Error("Malformed session response");
+  const session = value as Partial<BrowserSession>;
+  if (typeof session.id !== "string" || !/^[0-9a-f-]{36}$/i.test(session.id) ||
+      typeof session.sessionToken !== "string" || session.sessionToken.length < 32 ||
+      session.state !== "COLLECTING" || typeof session.openingPrompt !== "string") {
+    throw new Error("Malformed session response");
+  }
+  return session as BrowserSession;
+}
+
 export function apiBaseUrl(value: string | undefined): string {
   const input = value?.trim() || "/api";
   if (input.startsWith("/")) {

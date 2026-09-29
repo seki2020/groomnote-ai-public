@@ -6,6 +6,7 @@ export type Bindings = {
   ASSEMBLYAI_API_KEY?: string;
   DEMO_API_KEY: string;
   CORS_ALLOWED_ORIGIN?: string;
+  TURNSTILE_SECRET_KEY?: string;
   AI: Ai;
   DB: D1Database;
 };

@@ -3,6 +3,9 @@ import { identifierSchema } from "../persistence/schemas";
 export { speechRequestSchema } from "../audio/speech";
 
 export const createSessionRequestSchema = z.object({ appointmentId: identifierSchema });
+export const publicSessionRequestSchema = createSessionRequestSchema.extend({
+  turnstileToken: z.string().trim().min(1).max(2048),
+});
 export const addTurnRequestSchema = z.object({
   providerTurnId: z.string().trim().min(1).max(200),
   transcript: z.string().trim().min(1).max(8_000),
