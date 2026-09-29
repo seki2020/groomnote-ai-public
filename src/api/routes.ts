@@ -6,7 +6,7 @@ import {
   extractionToHandover,
   WorkersAIAnalyzer,
 } from "../analysis/workers-ai";
-import { fakeMp3, MP3_CONTENT_TYPE, WorkersAITts } from "../audio/tts";
+import { fakeMp3, fakeWav, MP3_CONTENT_TYPE, WAV_CONTENT_TYPE, WorkersAITts } from "../audio/tts";
 import {
   releaseSpeechRequest,
   reserveSpeechRequest,
@@ -543,6 +543,8 @@ api.post("/sessions/:id/speech", async (context) => {
     }
     const audio = context.env.TTS_MODE === "fake"
       ? { bytes: fakeMp3(), contentType: MP3_CONTENT_TYPE }
+      : context.env.TTS_MODE === "fake-wav"
+      ? { bytes: fakeWav(), contentType: WAV_CONTENT_TYPE }
       : await new WorkersAITts(
           context.env.AI as unknown as import("../audio/tts").TtsRunner,
         ).synthesize(text);

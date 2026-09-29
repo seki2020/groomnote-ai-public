@@ -1,5 +1,6 @@
 import type { BrowserSession } from "../api";
 import type { Microphone } from "../audio/types";
+import type { HalfDuplexGate } from "../audio/halfDuplex";
 import { TranscriptBuffer, type FinalTurn } from "./transcript";
 import type { SttWorkerApi, TemporarySttToken } from "./workerApi";
 
@@ -58,6 +59,7 @@ export class SttController {
     private readonly microphoneFactory: () => Promise<Microphone>,
     private readonly socketFactory: SocketFactory,
     private readonly notify: (snapshot: SttSnapshot) => void,
+    private readonly audioGate?: HalfDuplexGate,
   ) {}
 
   get snapshot(): SttSnapshot { return this.snapshotValue; }
@@ -69,6 +71,10 @@ export class SttController {
 
   async start(): Promise<void> {
     if (!["IDLE", "CLOSED", "ERROR"].includes(this.snapshotValue.state)) return;
+    if (this.audioGate && !this.audioGate.acquire("stt")) {
+      this.update({ state: "ERROR", error: "Stop speech playback before starting the microphone." });
+      return;
+    }
     this.finishRequested = false;
     this.terminated = false;
     this.transcript = new TranscriptBuffer();
@@ -207,6 +213,7 @@ export class SttController {
     this.microphone = null;
     this.terminateResolve = null;
     this.terminateReject = null;
+    this.audioGate?.release("stt");
   }
 
   async dispose(): Promise<void> {

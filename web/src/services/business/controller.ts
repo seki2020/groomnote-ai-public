@@ -8,6 +8,7 @@ export interface BusinessSnapshot {
   phase: BusinessPhase;
   backendState: BusinessState;
   question: string;
+  questionIdentity?: string;
   draft: ReviewDraft | null;
   transcriptRounds: CompletedTranscriptRound[];
   error: string;
@@ -43,7 +44,8 @@ export class BusinessController {
       const status = await this.api.getSession(this.session);
       if (decision.action === "follow_up") {
         if (status.state !== "AWAITING_FOLLOWUP") throw new Error("Analysis state does not match the follow-up response.");
-        this.update({ phase: status.state, backendState: status.state, question: decision.question, error: "" });
+        this.update({ phase: status.state, backendState: status.state, question: decision.question,
+          questionIdentity: `${roundId ?? "initial"}:${decision.question}`, error: "" });
       } else {
         if (status.state !== "REVIEWING" || status.currentDraftRevision !== decision.revision) throw new Error("Analysis state does not match the review response.");
         await this.loadReview(decision.revision);
@@ -69,6 +71,6 @@ export class BusinessController {
     const status = await this.api.getSession(this.session);
     if (status.state !== "AWAITING_APPROVAL" || status.currentDraftRevision !== draft.revision ||
         (expectedRevision !== undefined && expectedRevision !== draft.revision)) throw new Error("Review state or revision does not match the Worker.");
-    this.update({ phase: status.state, backendState: status.state, draft, question: "", error: "" });
+    this.update({ phase: status.state, backendState: status.state, draft, question: "", questionIdentity: undefined, error: "" });
   }
 }

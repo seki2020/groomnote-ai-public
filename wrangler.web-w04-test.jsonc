@@ -1,0 +1,22 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "groomnote-public-showcase",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-28",
+  "vars": {
+    "APP_ENV": "development",
+    "ANALYZER_MODE": "fake",
+    "TTS_MODE": "fake-wav",
+    "STT_TOKEN_MODE": "fake",
+    "ASSEMBLYAI_API_KEY": "PUBLIC_CONFIGURATION_PLACEHOLDER",
+    "DEMO_API_KEY": "PUBLIC_CONFIGURATION_PLACEHOLDER",
+    "CORS_ALLOWED_ORIGIN": "http://127.0.0.1:5176",
+    "TURNSTILE_SECRET_KEY": "PUBLIC_CONFIGURATION_PLACEHOLDER"
+  },
+  "d1_databases": [{
+    "binding": "DB",
+    "database_name": "groomnote-public-showcase",
+    "database_id": "PUBLIC_CONFIGURATION_PLACEHOLDER",
+    "migrations_dir": "migrations"
+  }]
+}
