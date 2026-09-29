@@ -9,6 +9,7 @@ artifacts/audio/
 __pycache__/
 *.py[cod]
 *.egg-info/
+*.tsbuildinfo
 .venv/
 .dev.vars*
 .env*
