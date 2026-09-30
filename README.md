@@ -1,12 +1,47 @@
 # GroomNote AI
 
-**Your grooming handover, made simple.**
+## Judges: try the live product first
 
-A voice-first assistant that turns a groomer's spoken recap into a structured, reviewed handover note. Built for the [AssemblyAI Voice Agent Hackathon](https://lablab.ai/ai-hackathons/assemblyai-voice-agent-hackathon).
+**Open the live demo linked on the hackathon submission page. Use an iPad or desktop browser and allow microphone access. No installation is needed to try the deployed product.** Deployment addresses are intentionally omitted from this source repository.
 
-## Start here
+### Test appointments — copy one ID
 
-The demo video and live experience will be provided on the hackathon submission page. Deployment addresses are intentionally omitted from this repository.
+| Scenario | Appointment ID |
+| --- | --- |
+| **Bella — review, repeat, correction and save** | **`44444444-4444-4444-8444-444444444444`** |
+| **Charlie — automatic follow-up and answer** | **`55555555-5555-4555-8555-555555555555`** |
+
+These are fictional appointment IDs, not login credentials. Refresh before each new session and use fictional information only; saved demo notes are persisted.
+
+### Recommended walkthrough: Bella
+
+1. Enter **Bella's Appointment ID**, wait for browser verification, and click **Start GroomNote**.
+2. Allow microphone access if prompted. Wait until the opening finishes and the page is listening, then say:
+
+   > Today I groomed Bella. She had a bath and brush. I cleaned her ears. She was calm throughout the groom. Next time, check her ears again. That's everything.
+
+3. Wait for the spoken review. If a follow-up is asked, answer and finish with **“That's everything.”**
+4. Once listening resumes, say **“Repeat that.”** Wait for playback to finish.
+5. Say **“Actually remove brushing and add nail trim.”** Wait for the updated review.
+6. Say **“Save the note.”** Look for the saved summary and verified persistence confirmation, then listen for the success announcement.
+
+Speak only after playback finishes. Say **“Discard this note.”** instead of saving to cancel. Bare **“Yes”** does not save. Visible manual controls remain available if browser audio or a provider interrupts the workflow.
+
+### Optional walkthrough: Charlie
+
+Refresh, enter **Charlie's Appointment ID**, and start. After the opening finishes, say:
+
+> Today I groomed Charlie. He was nervous when I used the dryer. That's everything.
+
+Wait for the spoken follow-up and automatic listening, then say:
+
+> I lowered the dryer speed and gave Charlie a short break. He calmed down. I completed his bath and brush. Next time, start with lower airflow. That's everything.
+
+The product should proceed to review without another business question. Then say **“Save the note”** or **“Discard this note.”** Recognition, model wording and timing can vary.
+
+## About GroomNote
+
+**Your grooming handover, made simple.** A voice-first assistant that turns a groomer's spoken recap into a structured, reviewed handover note. Built for the [AssemblyAI Voice Agent Hackathon](https://lablab.ai/ai-hackathons/assemblyai-voice-agent-hackathon).
 
 This repository is a **public technical showcase derived from the real development history**. It explains the implementation; private model instructions and deployment configuration are not included. Live analysis is deliberately disabled in this copy. It is not a turnkey installation of the deployed product.
 
@@ -73,7 +108,7 @@ The frontend orchestrator coordinates existing services; it does not replace the
 
 All **35 original reachable commits** are retained as sanitized counterparts with their original author/committer timestamps, order and parent relationships. The branch layout and two release milestone tags are retained. Author attribution is anonymized; commit and tag hashes differ. Documentation-only commits may be empty because their private contents were excluded.
 
-The sanitized W06/backend tags identify historical source milestones, **not runnable substitutes for the private frozen releases**. A separate new commit prepares this public presentation. No development commits were fabricated or backdated.
+The sanitized W06/backend tags identify historical source milestones, **not runnable substitutes for the private frozen releases**. Two new documentation commits prepare the public presentation and judge instructions. The default branch is `main`; the historical branches remain available. No development commits were fabricated or backdated.
 
 See [history and omissions](docs/PUBLIC_HISTORY.md) for the disclosure policy.
 

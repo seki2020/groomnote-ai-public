@@ -12,9 +12,9 @@ This technical showcase was generated from the real GroomNote AI development rep
 - Original binary artwork was replaced with newly created neutral SVG placeholders. Original assets and their metadata are not redistributed.
 - Branch names are retained. Tag annotations identify sanitized historical counterparts. SHA changes are a consequence of sanitization and are not claims of original release identity.
 
-The default branch is `experiment/w07-voice-first`; `master` and `archive/w06-click-ui` retain their historical W06 positions. `backend-v0.1.0` and `web-w06-click-ui-v1` retain their historical targets after transformation.
+The default branch is `main`, containing the public presentation and judge instructions. `experiment/w07-voice-first` retains the initial presentation commit; `master` and `archive/w06-click-ui` retain their historical W06 positions. `backend-v0.1.0` and `web-w06-click-ui-v1` retain their historical targets after transformation.
 
-The new final presentation commit is separate from the preserved development history and uses its actual preparation time. No remote is configured in the local review copy. Publication requires owner approval.
+The two presentation/instruction commits are separate from the preserved development history and use their actual preparation times. Public publication was authorized by the owner after preparation of the local review copy.
 
 ## Scope of verification
 

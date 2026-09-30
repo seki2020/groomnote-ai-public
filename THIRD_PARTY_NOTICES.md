@@ -7,4 +7,4 @@ The MIT license in this repository applies to original GroomNote AI code selecte
 - Original portrait/listening artwork is omitted. The two neutral SVG placeholders were created specifically for this showcase.
 - The build tooling uses a standard MIT license text; no React implementation is copied as original GroomNote code.
 
-Copyright attribution currently uses “GroomNote AI contributors” as the project collective. The owner must confirm attribution and the right to license the selected source before public publication.
+Copyright attribution uses “GroomNote AI contributors” as the project collective for the owner-authorized MIT showcase release. Third-party ownership remains separate.
