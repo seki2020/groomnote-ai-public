@@ -10,4 +10,5 @@ export function analyzeDeterministically(input: {
   hasFollowUpAnswer: boolean;
   correctionInstruction?: string;
   currentDraft?: HandoverContent;
+  followUpAllowed?: boolean;
 }): FakeAnalysis { throw new Error("PRIVATE_DEMO_ANALYZER_NOT_INCLUDED"); }

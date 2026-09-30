@@ -23,6 +23,7 @@ import {
   transitionSession,
 } from "../state-machine/service";
 import { correctionOptions, getCorrection, recoverCorrection, replayCorrection, type CorrectionRequest } from "../state-machine/correction";
+import { applyFollowUpPolicy } from "../analysis/follow-up-policy";
 import type { Bindings } from "../types";
 import {
   AssemblyAITokenProvider,
@@ -189,6 +190,13 @@ async function analyzeSession(
     throw new ApiError(409, "INSUFFICIENT_INPUT", "At least one transcript turn is required.");
   }
   const transcripts = turns.results.map((turn) => turn.transcript);
+  const demoPolicy = env.DEMO_SINGLE_FOLLOWUP === "true";
+  // Persisted history covers initial reports, corrections, retries and older sessions.
+  // This workflow rule is independent of HACKATHON_MODE quota bypass.
+  const previousQuestion = demoPolicy ? await env.DB.prepare(
+    "SELECT 1 AS asked FROM session_events WHERE session_id = ? AND event_type = 'FOLLOW_UP_ASKED' LIMIT 1",
+  ).bind(sessionId).first() : null;
+  const followUpAllowed = demoPolicy ? previousQuestion === null : undefined;
   if (env.ANALYZER_MODE === "fake") {
     return analyzeDeterministically({
       petName: identity.petName,
@@ -196,6 +204,7 @@ async function analyzeSession(
       hasFollowUpAnswer: options.hasFollowUpAnswer,
       correctionInstruction: options.correctionInstruction,
       currentDraft: options.currentDraft,
+      followUpAllowed,
     });
   }
   if (env.ANALYZER_MODE === "fake-error") {
@@ -217,7 +226,7 @@ async function analyzeSession(
       answer: answer.results.map(turn => turn.transcript).join(" "),
     };
   }
-  const extraction = await analyzer.analyze({
+  const providerExtraction = await analyzer.analyze({
     petName: identity.petName,
     breed: identity.breed,
     transcripts,
@@ -225,7 +234,10 @@ async function analyzeSession(
     correctionInstruction: options.correctionInstruction,
     correctionClarification,
     currentDraft: options.currentDraft,
+    followUpAllowed,
   });
+  // Enforce the workflow even if the model ignores the instruction to stop asking.
+  const extraction = demoPolicy ? applyFollowUpPolicy(providerExtraction, followUpAllowed!) : providerExtraction;
   if (extraction.needs_follow_up) {
     return { kind: "follow_up" as const, question: extraction.follow_up_question! };
   }

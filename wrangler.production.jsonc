@@ -12,6 +12,7 @@
   },
   "vars": {
     "APP_ENV": "production",
+    "DEMO_SINGLE_FOLLOWUP": "true", // One question per entire Demo session, including corrections.
     "HACKATHON_MODE": "true", // Owner decision: bypass application quotas for Hackathon, including production.
     "CORS_ALLOWED_ORIGIN": "https://demo.example.invalid",
     "ANALYZER_MODE": "workers-ai",

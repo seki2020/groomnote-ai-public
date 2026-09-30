@@ -152,6 +152,7 @@ export type AnalysisInput = {
   correctionInstruction?: string;
   correctionClarification?: { question: string; answer: string };
   currentDraft?: HandoverContent;
+  followUpAllowed?: boolean;
 };
 
 const systemPrompt = "PRIVATE_PROMPT_NOT_INCLUDED";
@@ -261,6 +262,7 @@ export class WorkersAIAnalyzer {
       correction_instruction: input.correctionInstruction ?? null,
       correction_clarification: input.correctionClarification ?? null,
       current_draft: input.currentDraft ?? null,
+      follow_up_allowed: input.followUpAllowed ?? true,
     };
     let lastError: unknown;
     let lastFailureStage: AnalysisFailureStage = "provider";

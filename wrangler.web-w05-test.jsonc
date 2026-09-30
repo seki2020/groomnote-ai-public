@@ -5,6 +5,7 @@
   "compatibility_date": "2026-09-28",
   "vars": {
     "APP_ENV": "development",
+    "DEMO_SINGLE_FOLLOWUP": "true",
     "ANALYZER_MODE": "fake",
     "TTS_MODE": "fake-wav",
     "STT_TOKEN_MODE": "fake",

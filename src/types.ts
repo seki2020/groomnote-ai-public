@@ -1,6 +1,7 @@
 export type Bindings = {
   APP_ENV: string;
   HACKATHON_MODE?: string;
+  DEMO_SINGLE_FOLLOWUP?: string;
   ANALYZER_MODE: "fake" | "fake-error" | "workers-ai";
   TTS_MODE: "fake" | "fake-wav" | "fake-error" | "workers-ai";
   STT_TOKEN_MODE: "fake" | "fake-error" | "assemblyai";
