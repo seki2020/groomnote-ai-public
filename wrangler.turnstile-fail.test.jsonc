@@ -5,6 +5,7 @@
   "compatibility_date": "2026-09-28",
   "vars": {
     "APP_ENV": "test",
+    "HACKATHON_MODE": "false", // Legacy quota regression only.
     "ANALYZER_MODE": "fake",
     "TTS_MODE": "fake",
     "STT_TOKEN_MODE": "fake",

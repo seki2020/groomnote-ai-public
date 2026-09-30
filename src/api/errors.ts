@@ -7,3 +7,9 @@ export class ApiError extends Error {
     super(message);
   }
 }
+
+// Hackathon response contract: never emit application HTTP 429 while bypass is
+// enabled. Provider failures stay failures; this does not bypass upstream limits.
+export function apiErrorStatus(error: ApiError, bypassQuotas: boolean): ApiError["status"] {
+  return bypassQuotas && error.status === 429 ? 503 : error.status;
+}

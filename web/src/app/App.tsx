@@ -18,6 +18,7 @@ import { HalfDuplexGate } from "../services/audio/halfDuplex";
 import { useTts } from "../hooks/useTts";
 import type { TtsTarget } from "../services/tts/controller";
 import { classifyReviewIntent } from "../services/review/intents";
+import { useOrchestration } from "../hooks/useOrchestration";
 
 export function App({ baseUrl = apiBaseUrl(import.meta.env.VITE_API_BASE_URL), fetcher = fetch }: { baseUrl?: string; fetcher?: typeof fetch }) {
   const [status, setStatus] = useState<"Checking..." | "Healthy" | "Unavailable">("Checking...");
@@ -30,6 +31,7 @@ export function App({ baseUrl = apiBaseUrl(import.meta.env.VITE_API_BASE_URL), f
   const stt = useStt(browserSession.session, baseUrl, fetcher, audioGate);
   const business = useBusinessWorkflow(browserSession.session, stt.snapshot, baseUrl, fetcher);
   const tts = useTts(browserSession.session, baseUrl, fetcher, audioGate);
+  const orchestration = useOrchestration(stt.controller, tts.controller, business.controller, audioGate, stt.snapshot, tts.unlock, async () => { if (!await browserSession.create(appointmentId, turnstileToken)) throw new Error("Session could not be created. Refresh verification and retry."); });
   const opening: TtsTarget | null = browserSession.session ? { kind: "opening", identity: "opening" } : null;
   const followUp: TtsTarget | null = business.snapshot.backendState === "AWAITING_FOLLOWUP" && business.snapshot.question
     ? { kind: "follow_up", identity: business.snapshot.questionIdentity ?? business.snapshot.question } : null;
@@ -52,10 +54,11 @@ export function App({ baseUrl = apiBaseUrl(import.meta.env.VITE_API_BASE_URL), f
   }, [baseUrl, fetcher]);
 
   useEffect(() => {
+    if (orchestration.snapshot.ownsWorkflow) return;
     if (success) tts.autoPlay(success);
     else if (followUp) tts.autoPlay(followUp);
     else if (review) tts.autoPlay(review);
-  }, [success?.identity, followUp?.identity, review?.identity, tts.snapshot.ready, business.snapshot.backendState]);
+  }, [success?.identity, followUp?.identity, review?.identity, tts.snapshot.ready, business.snapshot.backendState, orchestration.snapshot.ownsWorkflow]);
 
   async function finishVoiceInput() {
     if (stt.snapshot.captureMode === "business") { await stt.finish(); return; }
@@ -140,7 +143,7 @@ export function App({ baseUrl = apiBaseUrl(import.meta.env.VITE_API_BASE_URL), f
             : browserSession.session.openingPrompt;
   const stateLabel = isCancelled ? "CANCELLED" : business.snapshot.phase === "COMPLETED" ? "COMPLETED" : business.snapshot.backendState;
 
-  return <main className="groomnote-shell">
+  return <main className="groomnote-shell" onClickCapture={orchestration.manualClick}>
     <header className="topbar">
       <div className="brand-lockup">
         <span className="brand-mark" aria-hidden="true"><PawPrint size={26} weight="fill" /></span>
@@ -177,6 +180,15 @@ export function App({ baseUrl = apiBaseUrl(import.meta.env.VITE_API_BASE_URL), f
       </div>
     </section>
 
+    <section className="workflow-actions" aria-label="GroomNote voice workflow">
+      <button data-orchestration className="button button--primary" disabled={orchestration.snapshot.state !== "IDLE" || (browserSession.session !== null && business.snapshot.backendState !== "COLLECTING") || (!browserSession.session && (!turnstileToken || !appointmentId.trim() || browserSession.state === "LOADING"))} onClick={() => { void orchestration.start(); }}>Start GroomNote</button>
+      <span data-testid="orchestration-state" className="visually-hidden">{orchestration.snapshot.state}</span>
+      {orchestration.snapshot.message && <p aria-live="polite">{orchestration.snapshot.message}</p>}
+      {business.snapshot.backendState === "AWAITING_APPROVAL" && ["RECOVERABLE_ERROR", "MANUAL"].includes(orchestration.snapshot.state) && <button data-orchestration className="button button--secondary" disabled={ttsBusy || ["FINALIZING", "REQUESTING_MIC", "REQUESTING_TOKEN", "CONNECTING"].includes(stt.snapshot.state)} onClick={() => { void orchestration.resumeReview(); }}>Resume voice</button>}
+      {business.snapshot.backendState === "AWAITING_APPROVAL" && orchestration.snapshot.state !== "IDLE" && <div aria-label="Voice workflow review controls">
+        {(["correct", "repeat", "save", "cancel"] as const).map(action => <button key={action} data-orchestration className="button button--quiet" disabled={ttsBusy || ["FINALIZING", "REQUESTING_MIC", "REQUESTING_TOKEN", "CONNECTING"].includes(stt.snapshot.state) || ["SAVING", "CORRECTING", "VERIFYING_SAVE"].includes(business.snapshot.phase)} onClick={() => { if (action === "correct") setCorrectionMode(true); void orchestration.manualReview(action); }}>{action[0].toUpperCase() + action.slice(1)}</button>)}
+      </div>}
+    </section>
     {!browserSession.session ? <div className="setup-layout">
       <SessionSetupCard siteKey={siteKey} appointmentId={appointmentId} setAppointmentId={setAppointmentId}
         turnstileToken={turnstileToken} setTurnstileToken={setTurnstileToken} state={browserSession.state}

@@ -20,7 +20,7 @@ export class TtsController {
     private readonly player: SpeechPlayer,
     private readonly gate: HalfDuplexGate,
     private readonly notify: (snapshot: TtsSnapshot) => void,
-  ) {}
+  ) { this.value.ready = player.ready; }
   get snapshot() { return this.value; }
   private update(patch: Partial<TtsSnapshot>) { if (!this.disposed) { this.value = { ...this.value, ...patch }; this.notify(this.value); } }
   private key(target: TtsTarget) { return `${this.session.id}:${target.kind}:${target.identity}`; }
@@ -42,7 +42,8 @@ export class TtsController {
     void this.play(target);
   }
 
-  async play(target: TtsTarget): Promise<void> {
+  async play(target: TtsTarget, automatic = false): Promise<void> {
+    if (automatic) this.automatic.add(this.key(target));
     if (this.disposed || this.busy) return;
     if (!this.player.ready) { this.update({ ready: false, state: "ERROR", error: "Enable browser audio before playing speech." }); return; }
     if (!this.gate.acquire("tts")) { this.update({ state: "ERROR", error: "Finish microphone input before playing speech." }); return; }

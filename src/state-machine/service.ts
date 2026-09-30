@@ -86,6 +86,7 @@ export async function createDraft(
     sessionId: string;
     content: HandoverContent;
     spokenSummary: string;
+    correctionTurnId?: string;
   },
 ): Promise<number> {
   const id = identifierSchema.parse(input.id);
@@ -98,7 +99,7 @@ export async function createDraft(
   if (!spokenSummary) throw new Error("Spoken summary is required.");
   const revision = session.currentDraftRevision + 1;
 
-  const results = await db.batch([
+  const statements = [
     db
       .prepare(
         `UPDATE sessions
@@ -125,7 +126,11 @@ export async function createDraft(
         session.id,
         revision,
       ),
-  ]);
+  ];
+  if (input.correctionTurnId) statements.push(db.prepare(
+    "UPDATE correction_requests SET status = 'COMPLETED', result_json = ? WHERE session_id = ? AND provider_turn_id = ? AND base_revision = ? AND status = 'PROCESSING'",
+  ).bind(JSON.stringify({ action: "review", revision }), session.id, input.correctionTurnId, session.currentDraftRevision));
+  const results = await db.batch(statements);
   if (results[0].meta.changes !== 1 || results[1].meta.changes !== 1) {
     throw new Error("Concurrent draft revision detected.");
   }

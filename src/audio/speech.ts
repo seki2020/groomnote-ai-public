@@ -7,7 +7,7 @@ import {
 } from "../security/usage";
 
 export { MAX_TTS_CALLS_PER_SESSION } from "../security/usage";
-export const speechKinds = ["opening", "follow_up", "summary", "save_confirmation"] as const;
+export const speechKinds = ["opening", "follow_up", "summary", "save_confirmation", "silence_confirmation", "correction_prompt"] as const;
 export const speechRequestSchema = z.object({
   requestId: z.string().trim().min(1).max(200),
   utterance: z.enum(speechKinds),
@@ -20,6 +20,14 @@ export async function resolveAuthorizedUtterance(
   utterance: SpeechRequest["utterance"],
 ): Promise<string> {
   const session = await getSession(db, sessionId);
+  if (utterance === "silence_confirmation") {
+    if (!["COLLECTING", "AWAITING_FOLLOWUP"].includes(session.state)) throw new ApiError(409, "UTTERANCE_UNAVAILABLE", "No report is being collected.");
+    return "PUBLIC_SPEECH_COPY_PLACEHOLDER";
+  }
+  if (utterance === "correction_prompt") {
+    if (session.state !== "AWAITING_APPROVAL") throw new ApiError(409, "UTTERANCE_UNAVAILABLE", "No reviewed note is available for correction.");
+    return "PUBLIC_SPEECH_COPY_PLACEHOLDER";
+  }
   if (utterance === "opening") {
     const pet = await db.prepare(
       `SELECT p.name FROM sessions s JOIN appointments a ON a.id = s.appointment_id
@@ -32,7 +40,7 @@ export async function resolveAuthorizedUtterance(
     const event = await db.prepare(
       `SELECT payload_json AS payloadJson FROM session_events
        WHERE session_id = ? AND event_type = 'FOLLOW_UP_ASKED'
-       ORDER BY created_at DESC, id DESC LIMIT 1`,
+       ORDER BY created_at DESC, rowid DESC LIMIT 1`,
     ).bind(sessionId).first<{ payloadJson: string }>();
     if (!event) throw new ApiError(409, "UTTERANCE_UNAVAILABLE", "No follow-up is available.");
     return z.object({ question: z.string().min(1) }).parse(JSON.parse(event.payloadJson)).question;
@@ -55,6 +63,7 @@ export async function reserveSpeechRequest(
   db: D1Database,
   sessionId: string,
   request: SpeechRequest,
+  relaxed = false,
 ): Promise<void> {
   const duplicate = await db.prepare(
     "SELECT 1 AS found FROM speech_requests WHERE session_id = ? AND id = ?",
@@ -68,7 +77,7 @@ export async function reserveSpeechRequest(
     throw new ApiError(409, "DUPLICATE_SPEECH_REQUEST", "This speech request was already used.");
   }
   try {
-    await reserveProviderInvocation(db, sessionId, "tts");
+    await reserveProviderInvocation(db, sessionId, "tts", relaxed);
   } catch (error) {
     await db.prepare("DELETE FROM speech_requests WHERE session_id = ? AND id = ?")
       .bind(sessionId, request.requestId).run();

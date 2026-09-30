@@ -5,6 +5,7 @@
   "compatibility_date": "2026-09-28",
   "vars": {
     "APP_ENV": "development",
+    "HACKATHON_MODE": "false", // Explicit opt-out: exercise legacy quota enforcement in regression tests.
     "ANALYZER_MODE": "fake",
     "TTS_MODE": "fake",
     "STT_TOKEN_MODE": "fake",

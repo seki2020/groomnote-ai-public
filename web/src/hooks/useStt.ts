@@ -19,6 +19,7 @@ export function useStt(session: BrowserSession | null, baseUrl: string, fetcher:
   ) : null, [session, baseUrl, fetcher, gate]);
   useEffect(() => () => { if (controller) void controller.dispose(); }, [controller]);
   return {
+    controller,
     snapshot: controller ? snapshot : idle,
     start: (mode?: SttCaptureMode) => controller?.start(mode),
     finish: () => controller?.finish(),

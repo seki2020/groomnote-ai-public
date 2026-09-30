@@ -16,13 +16,13 @@ import {
 import { deserializeHandoverContent, identifierSchema } from "../persistence/schemas";
 import {
   approveAndSave,
-  beginCorrection,
   cancelSession,
   createDraft,
   getSession,
   reviewCurrentDraft,
   transitionSession,
 } from "../state-machine/service";
+import { correctionOptions, getCorrection, recoverCorrection, replayCorrection, type CorrectionRequest } from "../state-machine/correction";
 import type { Bindings } from "../types";
 import {
   AssemblyAITokenProvider,
@@ -42,6 +42,8 @@ import { MAX_API_REQUEST_BYTES } from "../security/request";
 import { BUSINESS_SESSION_DURATION_MS, cleanupExpiredSessions } from "../security/session";
 import { verifyTurnstile } from "../security/turnstile";
 import {
+  hackathonMode,
+  HACKATHON_USAGE_LIMIT,
   assertCorrectionAvailable,
   assertFollowUpAvailable,
   reserveProviderInvocation,
@@ -167,6 +169,7 @@ async function analyzeSession(
   options: {
     hasFollowUpAnswer: boolean;
     correctionInstruction?: string;
+    correctionRequest?: CorrectionRequest;
     currentDraft?: ReturnType<typeof deserializeHandoverContent>;
   },
 ) {
@@ -200,13 +203,27 @@ async function analyzeSession(
   }
   const analyzer = new WorkersAIAnalyzer(
     env.AI as unknown as import("../analysis/workers-ai").AiRunner,
+    details => console.warn("Workers AI attempt failed.", details),
+    hackathonMode(env),
   );
+  let correctionClarification: { question: string; answer: string } | undefined;
+  if (options.correctionRequest?.last_round_id) {
+    const question = await env.DB.prepare("SELECT payload_json AS payloadJson FROM session_events WHERE session_id = ? AND event_type = 'FOLLOW_UP_ASKED' ORDER BY created_at DESC, rowid DESC LIMIT 1")
+      .bind(sessionId).first<{ payloadJson: string }>();
+    const answer = await env.DB.prepare("SELECT transcript FROM transcript_turns WHERE session_id = ? AND stt_round_id = ? ORDER BY created_at, rowid")
+      .bind(sessionId, options.correctionRequest.last_round_id).all<{ transcript: string }>();
+    if (question && answer.results.length) correctionClarification = {
+      question: (JSON.parse(question.payloadJson) as { question: string }).question,
+      answer: answer.results.map(turn => turn.transcript).join(" "),
+    };
+  }
   const extraction = await analyzer.analyze({
     petName: identity.petName,
     breed: identity.breed,
     transcripts,
     hasFollowUpAnswer: options.hasFollowUpAnswer,
     correctionInstruction: options.correctionInstruction,
+    correctionClarification,
     currentDraft: options.currentDraft,
   });
   if (extraction.needs_follow_up) {
@@ -226,15 +243,25 @@ async function completeAnalysis(
 ) {
   const analysis = await analyzeSession(env, sessionId, options);
   if (analysis.kind === "follow_up") {
-    await assertFollowUpAvailable(env.DB, sessionId);
+    await assertFollowUpAvailable(env.DB, sessionId, hackathonMode(env));
     const latestRound = await env.DB.prepare(
       "SELECT COALESCE(MAX(round_number), 0) AS roundNumber FROM stt_rounds WHERE session_id = ?",
     ).bind(sessionId).first<{ roundNumber: number }>();
-    await transitionSession(env.DB, sessionId, "AWAITING_FOLLOWUP");
-    await env.DB.prepare(
-      `INSERT INTO session_events (id, session_id, event_type, payload_json)
-       VALUES (?, ?, 'FOLLOW_UP_ASKED', ?)`,
-    ).bind(crypto.randomUUID(), sessionId, JSON.stringify({ question: analysis.question, afterRoundNumber: latestRound?.roundNumber ?? 0 })).run();
+    const current = await getSession(env.DB, sessionId);
+    const payload = JSON.stringify({ question: analysis.question, afterRoundNumber: latestRound?.roundNumber ?? 0 });
+    if (!["ANALYZING", "CORRECTING"].includes(current.state)) throw new ApiError(409, "INVALID_STATE", "The session is not analyzing a report or correction.");
+    // State, authorized speech and correction result commit together.
+    const statements = [
+      env.DB.prepare("UPDATE sessions SET state = 'AWAITING_FOLLOWUP', updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ? AND state = ? AND current_draft_revision = ?")
+        .bind(sessionId, current.state, current.currentDraftRevision),
+      env.DB.prepare("INSERT INTO session_events (id, session_id, event_type, payload_json) VALUES (?, ?, 'FOLLOW_UP_ASKED', ?)")
+        .bind(crypto.randomUUID(), sessionId, payload),
+    ];
+    if (options.correctionRequest) statements.push(env.DB.prepare(
+      "UPDATE correction_requests SET status = 'AWAITING_FOLLOWUP', result_json = ? WHERE session_id = ? AND provider_turn_id = ? AND status = 'PROCESSING'",
+    ).bind(JSON.stringify({ action: "follow_up", question: analysis.question }), sessionId, options.correctionRequest.provider_turn_id));
+    const results = await env.DB.batch(statements);
+    if (results[0].meta.changes !== 1) throw new Error("Concurrent follow-up transition detected.");
     return { action: "follow_up" as const, question: analysis.question };
   }
   const revision = await createDraft(env.DB, {
@@ -242,8 +269,23 @@ async function completeAnalysis(
     sessionId,
     content: analysis.content,
     spokenSummary: analysis.spokenSummary,
+    correctionTurnId: options.correctionRequest?.provider_turn_id,
   });
   return { action: "review" as const, revision };
+}
+
+function providerFailure(error: AnalysisUnavailableError, fallbackCode: string, fallbackMessage: string, bypassQuotas: boolean): ApiError {
+  const details = safeAnalysisFailureDiagnostics(error);
+  if (details.providerReason === "daily_provider_limit" || details.providerCode === 3036) {
+    if (bypassQuotas) return new ApiError(503, "AI_PROVIDER_LIMIT_REPORTED",
+      "The AI provider request failed with a reported limit. Application quotas are bypassed; the upstream cause requires investigation. Your session remains available.");
+    return new ApiError(429, "AI_DAILY_ALLOWANCE_EXHAUSTED",
+      "Cloudflare Workers AI daily allowance is exhausted. Enable the Workers Paid plan or wait for the provider allowance to reset. Your session remains available.");
+  }
+  if (details.providerReason === "paid_plan_required" || details.providerCode === 5035) {
+    return new ApiError(403, "AI_PAID_PLAN_REQUIRED", "Cloudflare requires the Workers Paid plan for this AI request.");
+  }
+  return new ApiError(503, fallbackCode, fallbackMessage);
 }
 
 async function completeAnalysisRecovering(
@@ -262,7 +304,7 @@ async function completeAnalysisRecovering(
       if (env.APP_ENV === "development" && env.ANALYZER_MODE === "workers-ai") {
         console.warn("Workers AI analysis exhausted bounded retries.", safeAnalysisFailureDiagnostics(error));
       }
-      throw new ApiError(503, "ANALYSIS_UNAVAILABLE", "Analysis is unavailable. The transcript remains available; try again.");
+      throw providerFailure(error, "ANALYSIS_UNAVAILABLE", "Analysis is unavailable. The transcript remains available; try again.", hackathonMode(env));
     }
     throw error;
   }
@@ -319,7 +361,7 @@ api.post("/public/sessions", async (context) => {
   const usage = await context.env.DB.prepare(
     "SELECT session_creations AS count FROM daily_public_session_usage WHERE quota_date = date('now')",
   ).first<{ count: number }>();
-  if ((usage?.count ?? 0) >= MAX_DAILY_PUBLIC_SESSIONS) {
+  if (!hackathonMode(context.env) && (usage?.count ?? 0) >= MAX_DAILY_PUBLIC_SESSIONS) {
     throw new ApiError(429, "PUBLIC_SESSION_QUOTA_EXCEEDED", "The daily browser session limit is exhausted.");
   }
   await verifyTurnstile(body.turnstileToken, context.env.TURNSTILE_SECRET_KEY, origin, fetch, context.env.APP_ENV !== "production");
@@ -331,7 +373,7 @@ api.post("/public/sessions", async (context) => {
     `UPDATE daily_public_session_usage SET session_creations = session_creations + 1,
        updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
      WHERE quota_date = date('now') AND session_creations < ?`,
-  ).bind(MAX_DAILY_PUBLIC_SESSIONS).run();
+  ).bind(hackathonMode(context.env) ? HACKATHON_USAGE_LIMIT : MAX_DAILY_PUBLIC_SESSIONS).run();
   if (reserved.meta.changes !== 1) {
     throw new ApiError(429, "PUBLIC_SESSION_QUOTA_EXCEEDED", "The daily browser session limit is exhausted.");
   }
@@ -348,7 +390,12 @@ api.post("/public/sessions", async (context) => {
 api.get("/sessions/:id", async (context) => {
   const id = sessionIdFrom(context);
   await requireSessionCredential(context.env.DB, context.req.raw, id);
-  return context.json(await getSession(context.env.DB, id));
+  const session = await getSession(context.env.DB, id);
+  if (session.state !== "AWAITING_FOLLOWUP") return context.json(session);
+  const event = await context.env.DB.prepare("SELECT payload_json AS payloadJson FROM session_events WHERE session_id = ? AND event_type = 'FOLLOW_UP_ASKED' ORDER BY created_at DESC, rowid DESC LIMIT 1")
+    .bind(id).first<{ payloadJson: string }>();
+  const payload = event ? JSON.parse(event.payloadJson) as { question: string } : null;
+  return context.json({ ...session, question: payload?.question });
 });
 
 api.post("/sessions/:id/turns", async (context) => {
@@ -367,7 +414,7 @@ api.post("/sessions/:id/complete-round", async (context) => {
     throw new ApiError(409, "INVALID_STATE", "The session is not collecting turns.");
   }
   await assertNoKnownPetConflict(context.env.DB, id);
-  await reserveProviderInvocation(context.env.DB, id, "llm");
+  await reserveProviderInvocation(context.env.DB, id, "llm", hackathonMode(context.env));
   await transitionSession(context.env.DB, id, "ANALYZING");
   await context.env.DB.prepare(
     "UPDATE stt_rounds SET status = 'COMPLETED', completed_at = ? WHERE session_id = ? AND status = 'OPEN'",
@@ -386,7 +433,27 @@ api.post("/sessions/:id/reply", async (context) => {
     throw new ApiError(409, "INVALID_STATE", "The session is not awaiting a follow-up response.");
   }
   await assertNoKnownPetConflict(context.env.DB, id, body.transcript);
-  await reserveProviderInvocation(context.env.DB, id, "llm");
+  const pendingCorrection = await getCorrection(context.env.DB, id);
+  await reserveProviderInvocation(context.env.DB, id, "llm", hackathonMode(context.env));
+  if (pendingCorrection) {
+    return context.json(await finishCorrectionAnalysis(context.env, id, pendingCorrection, async () => {
+      await context.env.DB.prepare("UPDATE correction_requests SET status = 'PROCESSING', result_json = NULL WHERE session_id = ? AND provider_turn_id = ? AND status = 'AWAITING_FOLLOWUP'")
+        .bind(id, pendingCorrection.provider_turn_id).run();
+      await transitionSession(context.env.DB, id, "COLLECTING");
+      await insertTextTurn(context.env.DB, id, body.providerTurnId, body.transcript);
+      const answer = await context.env.DB.prepare("SELECT stt_round_id AS roundId FROM transcript_turns WHERE session_id = ? AND provider_turn_id = ?")
+        .bind(id, body.providerTurnId).first<{ roundId: string }>();
+      pendingCorrection.last_round_id = answer?.roundId ?? null;
+      await context.env.DB.prepare("UPDATE correction_requests SET last_round_id = ? WHERE session_id = ? AND provider_turn_id = ?")
+        .bind(pendingCorrection.last_round_id, id, pendingCorrection.provider_turn_id).run();
+      await transitionSession(context.env.DB, id, "ANALYZING");
+      await context.env.DB.prepare(
+        "UPDATE stt_rounds SET status = 'COMPLETED', completed_at = ? WHERE session_id = ? AND status = 'OPEN'",
+      )
+        .bind(new Date().toISOString(), id)
+        .run();
+    }));
+  }
   await transitionSession(context.env.DB, id, "COLLECTING");
   await insertTextTurn(context.env.DB, id, body.providerTurnId, body.transcript);
   await transitionSession(context.env.DB, id, "ANALYZING");
@@ -402,6 +469,9 @@ api.post("/sessions/:id/complete-follow-up-round", async (context) => {
   const id = sessionIdFrom(context);
   await requireSessionCredential(context.env.DB, context.req.raw, id);
   const body = await parseJson(context.req.raw, completedFollowUpRoundSchema);
+  const answered = await context.env.DB.prepare("SELECT * FROM correction_requests WHERE session_id = ? AND last_round_id = ?")
+    .bind(id, body.roundId).first<CorrectionRequest>();
+  if (answered) return context.json(replayCorrection(answered, answered.instruction));
   const session = await getSession(context.env.DB, id);
   if (session.state !== "AWAITING_FOLLOWUP") {
     throw new ApiError(409, "INVALID_STATE", "The session is not awaiting a follow-up response.");
@@ -420,60 +490,89 @@ api.post("/sessions/:id/complete-follow-up-round", async (context) => {
     throw new ApiError(409, "FOLLOW_UP_ROUND_REQUIRED", "A completed new follow-up transcription round is required.");
   }
   await assertNoKnownPetConflict(context.env.DB, id);
-  await reserveProviderInvocation(context.env.DB, id, "llm");
+  const pendingCorrection = await getCorrection(context.env.DB, id);
+  await reserveProviderInvocation(context.env.DB, id, "llm", hackathonMode(context.env));
+  if (pendingCorrection) {
+    // Claim the answer and business state together before any provider invocation.
+    const claimed = await context.env.DB.batch([
+      context.env.DB.prepare("UPDATE correction_requests SET status = 'PROCESSING', result_json = NULL, last_round_id = ? WHERE session_id = ? AND provider_turn_id = ? AND status = 'AWAITING_FOLLOWUP'")
+        .bind(body.roundId, id, pendingCorrection.provider_turn_id),
+      context.env.DB.prepare(`UPDATE sessions SET state = 'ANALYZING', updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+        WHERE id = ? AND state = 'AWAITING_FOLLOWUP' AND EXISTS (SELECT 1 FROM correction_requests
+        WHERE session_id = ? AND provider_turn_id = ? AND last_round_id = ? AND status = 'PROCESSING')`)
+        .bind(id, id, pendingCorrection.provider_turn_id, body.roundId),
+    ]);
+    if (claimed[0].meta.changes !== 1 || claimed[1].meta.changes !== 1) throw new ApiError(409, "CORRECTION_IN_PROGRESS", "The correction answer is already being processed.");
+    return context.json(await finishCorrectionAnalysis(context.env, id, { ...pendingCorrection, last_round_id: body.roundId }));
+  }
   await transitionSession(context.env.DB, id, "COLLECTING");
   await transitionSession(context.env.DB, id, "ANALYZING");
   return context.json(await completeAnalysisRecovering(context.env, id, "AWAITING_FOLLOWUP", { hasFollowUpAnswer: true }));
 });
 
+async function finishCorrectionAnalysis(env: Bindings, id: string, request: CorrectionRequest, prepare?: () => Promise<void>) {
+  try {
+    await prepare?.();
+    return await completeAnalysis(env, id, correctionOptions(request));
+  } catch (error) {
+    console.warn("Correction failed.", { sessionId: id, revision: request.base_revision,
+      stage: error instanceof AnalysisUnavailableError ? error.failureStage : "business",
+      errorName: error instanceof Error ? error.name : "UnknownError",
+      stack: error instanceof Error ? error.stack?.split("\n").filter(line => line.trim().startsWith("at ")).join("\n") : undefined,
+      issues: error instanceof z.ZodError ? error.issues.map(issue => ({ path: issue.path, code: issue.code })) : undefined });
+    // The result is persisted in the same transaction as the new draft/question.
+    const committed = await getCorrection(env.DB, id, request.provider_turn_id);
+    if (committed?.result_json && committed.status !== "PROCESSING" && committed.status !== "FAILED") {
+      return replayCorrection(committed, request.instruction);
+    }
+    const restored = await recoverCorrection(env.DB, request);
+    if (!restored) throw new ApiError(503, "CORRECTION_RECOVERY_UNCONFIRMED", "The correction state could not be restored. Reload the session before continuing.");
+    if (error instanceof AnalysisUnavailableError) throw providerFailure(error, "ANALYSIS_UNAVAILABLE",
+      "The correction could not be interpreted safely. Review the unchanged draft and try again.", hackathonMode(env));
+    throw new ApiError(503, "CORRECTION_UNAVAILABLE", "The correction was not applied. Review the unchanged draft and try again.");
+  }
+}
+
 api.post("/sessions/:id/correct", async (context) => {
   const id = sessionIdFrom(context);
   await requireSessionCredential(context.env.DB, context.req.raw, id);
   const body = await parseJson(context.req.raw, correctionRequestSchema);
+  const existing = await getCorrection(context.env.DB, id, body.providerTurnId);
+  if (existing) return context.json(replayCorrection(existing, body.transcript));
   const session = await getSession(context.env.DB, id);
   if (session.state !== "AWAITING_APPROVAL" || session.currentDraftRevision < 1) {
     throw new ApiError(409, "INVALID_STATE", "The session is not awaiting a correction.");
   }
-  assertCorrectionAvailable(session.currentDraftRevision);
+  assertCorrectionAvailable(session.currentDraftRevision, hackathonMode(context.env));
   const draft = await context.env.DB.prepare(
     "SELECT content_json AS contentJson FROM note_drafts WHERE session_id = ? AND revision = ?",
   ).bind(id, session.currentDraftRevision).first<{ contentJson: string }>();
   if (!draft) throw new ApiError(409, "DRAFT_NOT_FOUND", "The current draft is missing.");
-  const currentDraft = deserializeHandoverContent(draft.contentJson);
-  await reserveProviderInvocation(context.env.DB, id, "llm");
-  await beginCorrection(context.env.DB, id);
-  await insertTextTurn(context.env.DB, id, body.providerTurnId, body.transcript, ["CORRECTING"]);
-  await context.env.DB.prepare(
-    "UPDATE stt_rounds SET status = 'COMPLETED', completed_at = ? WHERE session_id = ? AND status = 'OPEN'",
-  ).bind(new Date().toISOString(), id).run();
+  deserializeHandoverContent(draft.contentJson);
+  await reserveProviderInvocation(context.env.DB, id, "llm", hackathonMode(context.env));
+  // Claim once before calling the provider; concurrent/replayed requests cannot create another revision.
   try {
-    return context.json(await completeAnalysis(context.env, id, {
-      hasFollowUpAnswer: true,
-      correctionInstruction: body.transcript,
-      currentDraft,
-    }));
-  } catch (error) {
-    if (!(error instanceof AnalysisUnavailableError)) throw error;
-    if (context.env.APP_ENV === "development" && context.env.ANALYZER_MODE === "workers-ai") {
-      console.warn("Workers AI correction exhausted bounded retries.", safeAnalysisFailureDiagnostics(error));
-    }
-    const results = await context.env.DB.batch([
-      context.env.DB.prepare(
-        "DELETE FROM transcript_turns WHERE session_id = ? AND provider_turn_id = ?",
-      ).bind(id, body.providerTurnId),
-      context.env.DB.prepare(
-        `UPDATE sessions SET state = 'REVIEWING', reviewed_revision = NULL,
-             approved_revision = NULL, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-         WHERE id = ? AND state = 'CORRECTING' AND current_draft_revision = ?`,
-      ).bind(id, session.currentDraftRevision),
+    const claimed = await context.env.DB.batch([
+      context.env.DB.prepare(`INSERT INTO correction_requests (session_id, provider_turn_id, instruction, base_revision, draft_json, status)
+        SELECT id, ?, ?, current_draft_revision, ?, 'PROCESSING' FROM sessions WHERE id = ? AND state = 'AWAITING_APPROVAL' AND current_draft_revision = ?`)
+        .bind(body.providerTurnId, body.transcript, draft.contentJson, id, session.currentDraftRevision),
+      context.env.DB.prepare(`UPDATE sessions SET state = 'CORRECTING', reviewed_revision = NULL, approved_revision = NULL,
+        updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ? AND state = 'AWAITING_APPROVAL'
+        AND EXISTS (SELECT 1 FROM correction_requests WHERE session_id = ? AND provider_turn_id = ? AND status = 'PROCESSING')`)
+        .bind(id, id, body.providerTurnId),
     ]);
-    if (results[1].meta.changes !== 1) throw error;
-    throw new ApiError(
-      503,
-      "ANALYSIS_UNAVAILABLE",
-      "The correction could not be interpreted safely. Review the unchanged draft and try again.",
-    );
+    if (claimed[0].meta.changes !== 1 || claimed[1].meta.changes !== 1) throw new Error("Correction claim failed.");
+  } catch {
+    const duplicate = await getCorrection(context.env.DB, id, body.providerTurnId);
+    if (duplicate) return context.json(replayCorrection(duplicate, body.transcript));
+    throw new ApiError(409, "CORRECTION_IN_PROGRESS", "Another correction is already being processed.");
   }
+  const request = (await getCorrection(context.env.DB, id, body.providerTurnId))!;
+  return context.json(await finishCorrectionAnalysis(context.env, id, request, async () => {
+    await insertTextTurn(context.env.DB, id, body.providerTurnId, body.transcript, ["CORRECTING"]);
+    await context.env.DB.prepare("UPDATE stt_rounds SET status = 'COMPLETED', completed_at = ? WHERE session_id = ? AND status = 'OPEN'")
+      .bind(new Date().toISOString(), id).run();
+  }));
 });
 
 api.post("/sessions/:id/review", async (context) => {
@@ -498,6 +597,11 @@ api.post("/sessions/:id/approve", async (context) => {
   const id = sessionIdFrom(context);
   await requireSessionCredential(context.env.DB, context.req.raw, id);
   const body = await parseJson(context.req.raw, approveRequestSchema);
+  const session = await getSession(context.env.DB, id);
+  if (session.state !== "COMPLETED" && (session.state !== "AWAITING_APPROVAL" ||
+      session.reviewedRevision !== session.currentDraftRevision || body.revision !== session.currentDraftRevision)) {
+    throw new ApiError(409, "APPROVAL_REVISION_REQUIRED", "Review and approve the current draft revision before saving.");
+  }
   const note = await approveAndSave(context.env.DB, {
     sessionId: id,
     requestedRevision: body.revision,
@@ -521,11 +625,11 @@ api.post("/sessions/:id/stt-token", async (context) => {
       : context.env.STT_TOKEN_MODE === "fake-error"
         ? new FailingTokenProvider()
         : new AssemblyAITokenProvider(context.env.ASSEMBLYAI_API_KEY ?? "");
-  const sessionIssuanceLimit = resolveSessionSttTokenIssuanceLimit(
+  const sessionIssuanceLimit = hackathonMode(context.env) ? HACKATHON_USAGE_LIMIT : resolveSessionSttTokenIssuanceLimit(
     context.env.APP_ENV,
     context.env.DEV_STT_SESSION_TOKEN_ISSUANCE_LIMIT,
   );
-  const dailyIssuanceLimit = resolveDailySttTokenIssuanceLimit(
+  const dailyIssuanceLimit = hackathonMode(context.env) ? HACKATHON_USAGE_LIMIT : resolveDailySttTokenIssuanceLimit(
     context.env.APP_ENV,
     context.env.DEV_STT_DAILY_TOKEN_ISSUANCE_LIMIT,
   );
@@ -557,7 +661,7 @@ api.post("/sessions/:id/speech", async (context) => {
   await requireSessionCredential(context.env.DB, context.req.raw, id);
   const body = await parseJson(context.req.raw, speechRequestSchema);
   const text = await resolveAuthorizedUtterance(context.env.DB, id, body.utterance);
-  await reserveSpeechRequest(context.env.DB, id, body);
+  await reserveSpeechRequest(context.env.DB, id, body, hackathonMode(context.env));
   try {
     if (context.env.TTS_MODE === "fake-error") {
       throw new Error("Deterministic TTS provider failure.");
@@ -568,6 +672,7 @@ api.post("/sessions/:id/speech", async (context) => {
       ? { bytes: fakeWav(), contentType: WAV_CONTENT_TYPE }
       : await new WorkersAITts(
           context.env.AI as unknown as import("../audio/tts").TtsRunner,
+          hackathonMode(context.env),
         ).synthesize(text);
     return new Response(audio.bytes.slice().buffer as ArrayBuffer, {
       headers: {
@@ -575,9 +680,10 @@ api.post("/sessions/:id/speech", async (context) => {
         "X-GroomNote-Utterance": body.utterance,
       },
     });
-  } catch {
+  } catch (error) {
+    console.warn("Workers AI speech failed.", safeAnalysisFailureDiagnostics(new AnalysisUnavailableError(error)));
     await releaseSpeechRequest(context.env.DB, id, body.requestId);
-    throw new ApiError(503, "TTS_UNAVAILABLE", "Speech generation is temporarily unavailable.");
+    throw providerFailure(new AnalysisUnavailableError(error), "TTS_UNAVAILABLE", "Speech generation is temporarily unavailable.", hackathonMode(context.env));
   }
 });
 

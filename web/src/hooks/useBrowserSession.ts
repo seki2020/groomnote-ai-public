@@ -13,9 +13,11 @@ export function useBrowserSession(baseUrl: string, fetcher: typeof fetch) {
       const result = await createPublicSession(baseUrl, appointmentId, turnstileToken, fetcher);
       setSession(result);
       setState("READY");
+      return result;
     } catch {
       setState("ERROR");
       setError("Could not create session. Refresh verification and retry.");
+      return null;
     }
   }
   return { session, state, error, create };

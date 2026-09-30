@@ -80,21 +80,38 @@ export class BusinessController {
     this.update({ phase: "CORRECTING", error: "" });
     try {
       const decision = await this.api.correct(this.session, `${roundId}:correction`, transcript.trim());
-      if (decision.action !== "review" || decision.revision <= previousDraft.revision) throw new Error("Correction did not produce a newer review revision.");
       const status = await this.api.getSession(this.session);
+      if (decision.action === "follow_up") {
+        if (status.state !== "AWAITING_FOLLOWUP" || status.currentDraftRevision !== previousDraft.revision) throw new Error("Correction follow-up state does not match the Worker.");
+        this.update({ phase: status.state, backendState: status.state, question: decision.question,
+          questionIdentity: `${roundId}:correction:${decision.question}`, reviewedRevision: null, error: "" });
+        return this.value;
+      }
+      if (decision.revision <= previousDraft.revision) throw new Error("Correction did not produce a newer review revision.");
       if (status.state !== "REVIEWING" || status.currentDraftRevision !== decision.revision) throw new Error("Correction revision does not match the Worker session.");
       await this.loadReview(decision.revision);
     } catch (error) {
       const detail = error instanceof BusinessApiError ? `${error.code} (${error.status}): ${error.message}` : error instanceof Error ? error.message : "Correction failed.";
       let current = this.value.backendState;
       try { current = (await this.api.getSession(this.session)).state; } catch { /* Keep last confirmed state. */ }
-      if (current === "REVIEWING") {
+      if (current === "AWAITING_FOLLOWUP") {
+        try {
+          const status = await this.api.getSession(this.session);
+          if (status.question && status.currentDraftRevision === previousDraft.revision) {
+            this.update({ phase: current, backendState: current, question: status.question,
+              questionIdentity: `${roundId}:correction:${status.question}`, reviewedRevision: null, error: "" });
+            return this.value;
+          }
+        } catch { /* Keep the last confirmed state and expose fallback. */ }
+      }
+      if (current === "REVIEWING" || current === "AWAITING_APPROVAL") {
         try {
           const status = await this.api.getSession(this.session);
           await this.loadReview(status.currentDraftRevision);
+          if (status.currentDraftRevision > previousDraft.revision) return this.value;
         } catch { this.update({ backendState: current }); }
       } else {
-        this.update({ backendState: current, phase: current === "AWAITING_APPROVAL" ? current : "ERROR" });
+        this.update({ backendState: current, phase: "ERROR" });
       }
       this.update({ phase: "ERROR", error: `Correction was not applied: ${detail}` });
     } finally { this.busy = false; }

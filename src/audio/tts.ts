@@ -11,10 +11,10 @@ export interface TtsRunner {
   ): Promise<unknown>;
 }
 
-export function validateTtsText(text: string): string {
+export function validateTtsText(text: string, relaxed = false): string {
   const normalized = text.trim();
   if (!normalized) throw new Error("TTS text is required.");
-  if (normalized.length > MAX_TTS_CHARACTERS) {
+  if (!relaxed && normalized.length > MAX_TTS_CHARACTERS) {
     throw new Error(`TTS text exceeds ${MAX_TTS_CHARACTERS} characters.`);
   }
   return normalized;
@@ -78,11 +78,11 @@ export interface TtsAudio {
 }
 
 export class WorkersAITts {
-  constructor(private readonly ai: TtsRunner) {}
+  constructor(private readonly ai: TtsRunner, private readonly relaxed = false) {}
 
   async synthesize(text: string): Promise<TtsAudio> {
     const output = await this.ai.run(WORKERS_AI_TTS_MODEL, {
-      prompt: validateTtsText(text),
+      prompt: validateTtsText(text, this.relaxed),
       lang: "en",
     });
     const bytes = await toBytes(output);

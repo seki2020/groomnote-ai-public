@@ -147,11 +147,13 @@ export class SttController {
         } else if (data.type === "Error" || data.type === "SessionError") {
           const error = new Error("Transcription provider error.");
           if (!begun) { clearTimeout(handshakeTimer); reject(error); }
+          else if (this.snapshotValue.state === "LISTENING") void this.failConnected();
           else this.terminateReject?.(error);
         }
       };
       socket.onerror = () => {
         if (!begun) { clearTimeout(handshakeTimer); reject(new Error("Transcription connection failed.")); }
+        else if (this.snapshotValue.state === "LISTENING") void this.failConnected();
         else this.terminateReject?.(new Error("Transcription connection failed."));
       };
       socket.onclose = () => {
@@ -162,18 +164,18 @@ export class SttController {
     });
   }
 
-  async finish(): Promise<void> {
+  async finish(transform?: (turn: FinalTurn) => FinalTurn | null): Promise<void> {
     if (this.snapshotValue.state === "CONNECTING" || this.snapshotValue.state === "REQUESTING_MIC" || this.snapshotValue.state === "REQUESTING_TOKEN") {
       this.finishRequested = true;
       return;
     }
     if (this.snapshotValue.state !== "LISTENING") return this.finishTask ?? Promise.resolve();
     if (this.finishTask) return this.finishTask;
-    this.finishTask = this.finishConnected();
+    this.finishTask = this.finishConnected(transform);
     try { await this.finishTask; } finally { this.finishTask = null; }
   }
 
-  private async finishConnected(): Promise<void> {
+  private async finishConnected(transform?: (turn: FinalTurn) => FinalTurn | null): Promise<void> {
     this.update({ state: "FINALIZING" });
     if (this.capTimer) clearTimeout(this.capTimer);
     this.microphone?.stopSending();
@@ -183,7 +185,7 @@ export class SttController {
       this.socket.send(JSON.stringify({ type: "Terminate" }));
       await Promise.race([termination, new Promise<never>((_, reject) => setTimeout(() => reject(new Error("Transcription finalization timed out.")), TERMINATION_WAIT_MS))]);
       const completedRoundId = this.roundId;
-      const finalTurns = this.transcript.finalTurns;
+      const finalTurns = transform ? this.transcript.finalTurns.map(transform).filter((turn): turn is FinalTurn => turn !== null) : this.transcript.finalTurns;
       const capturedText = finalTurns.map(turn => turn.transcript).join(" ").trim();
       if (this.captureMode === "business") {
         for (const turn of finalTurns) {
@@ -193,7 +195,7 @@ export class SttController {
         await this.api.completeConnection(this.session, completedRoundId);
         this.roundId = null;
       }
-      this.update({ state: "CLOSED", round: this.captureMode === "business" ? "CLOSED" : "OPEN", completedRoundId, capturedText, partial: "" });
+      this.update({ state: "CLOSED", round: this.captureMode === "business" ? "CLOSED" : "OPEN", completedRoundId, capturedText, finalTurns, partial: "" });
     } catch (error) {
       await this.abandonRound();
       this.update({ state: "ERROR", error: error instanceof Error ? error.message : "Transcription finalization failed." });

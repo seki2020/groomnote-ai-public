@@ -7,6 +7,7 @@
   "preview_urls": false,
   "vars": {
     "APP_ENV": "production",
+    "HACKATHON_MODE": "true", // Owner decision: bypass application quotas for Hackathon, including production.
     "ANALYZER_MODE": "workers-ai",
     "TTS_MODE": "workers-ai",
     "STT_TOKEN_MODE": "assemblyai"

@@ -1,7 +1,8 @@
 import { Hono } from "hono";
 import { ZodError } from "zod";
 
-import { ApiError } from "./api/errors";
+import { ApiError, apiErrorStatus } from "./api/errors";
+import { hackathonMode } from "./security/usage";
 import { api } from "./api/routes";
 import { validateRuntimeConfig } from "./config";
 import type { Bindings } from "./types";
@@ -57,7 +58,7 @@ app.notFound((context) =>
 
 app.onError((error, context) => {
   if (error instanceof ApiError) {
-    return context.json({ error: { code: error.code, message: error.message } }, error.status);
+    return context.json({ error: { code: error.code, message: error.message } }, apiErrorStatus(error, hackathonMode(context.env)));
   }
   if (error instanceof ZodError) {
     return context.json(

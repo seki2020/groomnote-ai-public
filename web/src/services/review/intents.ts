@@ -16,19 +16,19 @@ export function classifyReviewIntent(input: string): ReviewIntent {
   const text = normalize(input);
   if (!text) return { kind: "unknown" };
 
-  if (/^(?:yes )?(?:approve(?: and save)?|approved|save(?: it| the note| this note)?|looks good|that s correct|that is correct)(?: please)?$/.test(text)) {
+  if (/^(?:yes )?(?:approve(?: and save)?|approved|save(?: it| the note| this note)?|looks good(?: save it)?|that s correct(?: save it)?|that is correct(?: save it)?)(?: please)?$/.test(text)) {
     return { kind: "approve" };
   }
-  if (/^(?:discard(?: the note)?|cancel(?: this note)?|do not save(?: it| the note)?|dont save(?: it| the note)?)$/.test(text)) {
+  if (/^(?:discard(?: the note| this note)?|cancel(?: this note)?|do not save(?: it| the note)?|don t save(?: it| the note)?|dont save(?: it| the note)?)$/.test(text)) {
     return { kind: "discard" };
   }
-  if (/^(?:repeat(?: that| the summary)?|say that again|say the summary again)$/.test(text)) {
+  if (/^(?:repeat(?: that| the summary)?|say that again|say the summary again|read it again)$/.test(text)) {
     return { kind: "repeat" };
   }
   if (/^(?:read(?: the )?(?:full )?note|read everything|read the whole note)$/.test(text)) {
     return { kind: "full_readback" };
   }
-  if (/^(?:correction|correct|change something|i need to correct that)$/.test(text)) {
+  if (/^(?:correction|correct|change something|i need to correct that|i need to change something)$/.test(text)) {
     return { kind: "enter_correction" };
   }
   if (/^(?:correction|correct|change|actually|add|remove|replace)\s+\S+/.test(text)) {

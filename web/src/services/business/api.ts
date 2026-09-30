@@ -1,7 +1,7 @@
 import type { BrowserSession } from "../api";
 
 export type BusinessState = "COLLECTING" | "ANALYZING" | "AWAITING_FOLLOWUP" | "REVIEWING" | "AWAITING_APPROVAL" | "CORRECTING" | "SAVING" | "COMPLETED" | "FAILED" | "CANCELLED" | "EXPIRED";
-export interface SessionStatus { state: BusinessState; currentDraftRevision: number; reviewedRevision?: number | null; approvedRevision?: number | null }
+export interface SessionStatus { question?: string; state: BusinessState; currentDraftRevision: number; reviewedRevision?: number | null; approvedRevision?: number | null }
 export type AnalysisDecision = { action: "follow_up"; question: string } | { action: "review"; revision: number };
 export interface DraftContent {
   petName: string;
@@ -41,7 +41,7 @@ export function parseSessionStatus(value: unknown): SessionStatus {
       !Number.isSafeInteger(value.currentDraftRevision) || (value.currentDraftRevision as number) < 0) throw new Error("Malformed session state");
   const nullableRevision = (input: unknown) => input === null || input === undefined || (Number.isSafeInteger(input) && (input as number) > 0);
   if (!nullableRevision(value.reviewedRevision) || !nullableRevision(value.approvedRevision)) throw new Error("Malformed session revision status");
-  return { state: value.state as BusinessState, currentDraftRevision: value.currentDraftRevision as number,
+  return { question: typeof value.question === "string" ? value.question : undefined, state: value.state as BusinessState, currentDraftRevision: value.currentDraftRevision as number,
     reviewedRevision: typeof value.reviewedRevision === "number" ? value.reviewedRevision : null,
     approvedRevision: typeof value.approvedRevision === "number" ? value.approvedRevision : null };
 }
