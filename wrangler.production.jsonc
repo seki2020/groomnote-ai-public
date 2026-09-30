@@ -5,9 +5,15 @@
   "compatibility_date": "2026-09-28",
   "workers_dev": true,
   "preview_urls": false,
+  "assets": {
+    "directory": "./dist/w07-web",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/health", "/v1/*"]
+  },
   "vars": {
     "APP_ENV": "production",
     "HACKATHON_MODE": "true", // Owner decision: bypass application quotas for Hackathon, including production.
+    "CORS_ALLOWED_ORIGIN": "https://demo.example.invalid",
     "ANALYZER_MODE": "workers-ai",
     "TTS_MODE": "workers-ai",
     "STT_TOKEN_MODE": "assemblyai"
